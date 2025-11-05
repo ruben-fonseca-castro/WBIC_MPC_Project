@@ -1,0 +1,16 @@
+package lcm_msgs;
+struct unitree_a1_control_t {
+    int64_t  timestamp;
+
+    double   qj_tau[12];
+
+    double   qj_pos[12];
+    double   qj_vel[12];
+
+    double   kp[12];
+    double   kd[12];
+
+    boolean  reset_se;
+
+    double  contact[4]; // scheduled contact for each foot
+}
