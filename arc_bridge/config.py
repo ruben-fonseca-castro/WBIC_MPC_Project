@@ -19,7 +19,7 @@ class Config:
         "pendulum":         "Pendulum/pendulum_scene.xml",
         "biped_pointfoot":  "BipedPointfoot/biped_pointfoot_scene.xml",
         "biped_linefoot":   "BipedLinefoot/biped_linefoot_scene.xml",
-        "unitree_a1":       "unitree_a1/a1.xml",
+        "unitree_a1":       "unitree_a1/scene.xml",
         # "arm2link":         "Arm2Link/arm2link_sensing.xml",
     }
     valid_robot_types = list(robot_path_dict.keys())
