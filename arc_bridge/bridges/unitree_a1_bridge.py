@@ -119,10 +119,6 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
 
     def calculate_foot_position_and_velocity(self):
         """
-        ******************************************************************
-        *** TODO: IMPLEMENT THIS FUNCTION FOR THE A1 ROBOT ***
-        ******************************************************************
-        
         Calculates the position and velocity of all 4 feet relative to the 
         trunk (body) frame using the current joint positions (qj_pos) and 
         velocities (qj_vel).
@@ -134,9 +130,38 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
             vf (np.array(4, 3)): Foot velocities in body frame [FR, FL, RR, RL]
         """
         
-        # Placeholder: return zeros
-        print("WARNING: calculate_foot_position_and_velocity() is not implemented!")
-        return np.zeros((4, 3)), np.zeros((4, 3))
+        l1 = 0.08505 # abad to hip
+        l2 = 0.2   # hip to knee
+        l3 = 0.2   # knee to foot
+
+        qj_pos_np = np.array(self.low_state.qj_pos).reshape((4, 3))
+        qj_vel_np = np.array(self.low_state.qj_vel).reshape((4, 3))
+        th1, th2, th3 = qj_pos_np[:, 0], qj_pos_np[:, 1], qj_pos_np[:, 2]
+        dth1, dth2, dth3 = qj_vel_np[:, 0], qj_vel_np[:, 1], qj_vel_np[:, 2]
+
+        p_foot = np.array([-l1 - l3*np.sin(th2 + th3) - l2*np.sin(th2),
+                           np.sin(th1)*(l3*np.cos(th2 + th3) + l2*np.cos(th2)),
+                           -np.cos(th1)*(l3*np.cos(th2 + th3) + l2*np.cos(th2))]).T
+
+        v_foot = np.array([-l2*dth2*np.cos(th2) - l3*dth2*np.cos(th2 + th3) - l3*dth3*np.cos(th2 + th3),
+                           l2*dth1*np.cos(th1)*np.cos(th2) 
+                           - l2*dth2*np.sin(th1)*np.sin(th2) 
+                           + l3*dth1*np.cos(th1)*np.cos(th2)*np.cos(th3) 
+                           - l3*dth1*np.cos(th1)*np.sin(th2)*np.sin(th3) 
+                           - l3*dth2*np.cos(th2)*np.sin(th1)*np.sin(th3) 
+                           - l3*dth2*np.cos(th3)*np.sin(th1)*np.sin(th2) 
+                           - l3*dth3*np.cos(th2)*np.sin(th1)*np.sin(th3) 
+                           - l3*dth3*np.cos(th3)*np.sin(th1)*np.sin(th2),
+                           l2*dth1*np.sin(th1)*np.cos(th2) 
+                           + l2*dth2*np.cos(th1)*np.sin(th2) 
+                           + l3*dth1*np.sin(th1)*np.cos(th2)*np.cos(th3) 
+                           + l3*dth2*np.cos(th1)*np.cos(th2)*np.sin(th3) 
+                           + l3*dth2*np.cos(th1)*np.cos(th3)*np.sin(th2) 
+                           + l3*dth3*np.cos(th1)*np.cos(th2)*np.sin(th3) 
+                           + l3*dth3*np.cos(th1)*np.cos(th3)*np.sin(th2) 
+                           - l3*dth1*np.sin(th1)*np.sin(th2)*np.sin(th3)]).T
+
+        return p_foot + self.hip_pos_body_frame, v_foot
 
     def parse_robot_specific_low_state(self, backend="mujoco"):
         """
@@ -151,16 +176,7 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
         # Update low_state.position[2] and low_state.velocity
         self.update_state_estimation()
 
-        if backend == "pinocchio":
-            # --- TODO: Implement Pinocchio backend if needed ---
-            pass
-            # q = ...
-            # v = ...
-            # pin.computeAllTerms(self.pin_model, self.pin_data, q, v)
-            # self.update_kinematics_and_dynamics_pinocchio(q, v)
-        else:
-            # Default to MuJoCo backend
-            self.update_kinematics_and_dynamics_mujoco()
+        self.update_kinematics_and_dynamics_mujoco()
 
     def update_kinematics_and_dynamics_mujoco(self):
         """
@@ -181,14 +197,31 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
         # --- Torso Jacobians (J_tor, dJdq_tor) ---
         torso_id = mujoco.mj_name2id(self.mj_model, mujoco._enums.mjtObj.mjOBJ_BODY, self.torso_name)
         torso_pos = self.mj_data.xpos[torso_id]
-        J_tor = np.zeros((6, self.mj_model.nv))
-        dJ_tor = np.zeros((6, self.mj_model.nv))
         
-        mujoco.mj_jac(self.mj_model, self.mj_data, J_tor[:3, :], J_tor[3:, :], torso_pos, torso_id)
-        mujoco.mj_jacDot(self.mj_model, self.mj_data, dJ_tor[:3, :], dJ_tor[3:, :], torso_pos, torso_id)
-        
+        J_tor_trans = np.zeros((3, self.mj_model.nv))
+        J_tor_rot = np.zeros((3, self.mj_model.nv))
+        dJ_tor_trans = np.zeros((3, self.mj_model.nv))
+        dJ_tor_rot = np.zeros((3, self.mj_model.nv))
+
+        mujoco.mj_jac(self.mj_model, self.mj_data, J_tor_trans, J_tor_rot, torso_pos, torso_id)
+        mujoco.mj_jacDot(self.mj_model, self.mj_data, dJ_tor_trans, dJ_tor_rot, torso_pos, torso_id)
+
+        # Stack to shape (12, nv) as required by your LCM message (pad with zeros)
+        J_tor = np.zeros((12, self.mj_model.nv))
+        J_tor[0:3, :] = J_tor_trans
+        J_tor[3:6, :] = J_tor_rot
+        # The remaining rows (6:12) are left as zeros
+
+        dJ_tor = np.zeros((12, self.mj_model.nv))
+        dJ_tor[0:3, :] = dJ_tor_trans
+        dJ_tor[3:6, :] = dJ_tor_rot
+        # The remaining rows (6:12) are left as zeros
+
         self.low_state.J_tor = J_tor.tolist()
         self.low_state.dJdq_tor = (dJ_tor @ dq).tolist()
+
+        # self.low_state.J_tor = J_tor.flatten().tolist()
+        # self.low_state.dJdq_tor = (dJ_tor @ dq).flatten().tolist()
 
         # --- Foot Jacobians (J_gc, dJdq_gc) and Positions (p_gc) ---
         J_gc_list = []
