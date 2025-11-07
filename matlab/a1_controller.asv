@@ -28,8 +28,8 @@ elseif strcmp(person_select,'Ruben')
     
     % 2. Set the path to your 'arc-bridge' project folder
     % e.g., 'C:\Users\YourName\Documents\arc-bridge'
-    % project_dir = fullfile(getenv('USERPROFILE'), 'Documents_COPY', 'arc-bridge');
-    project_dir = 'C:\Users\Ruben\Documents_COPY\LeggedRobots\Final_Project\arc-bridge';
+    project_dir = fullfile(getenv('USERPROFILE'), 'Documents_COPY', 'arc-bridge');
+    project_dir = 'C:\Users\Ruben\Documents_COPY'
 
     
 elseif strcmp(person_select,'Pranav')
