@@ -28,8 +28,8 @@ elseif strcmp(person_select,'Ruben')
     
     % 2. Set the path to your 'arc-bridge' project folder
     % e.g., 'C:\Users\YourName\Documents\arc-bridge'
-    % project_dir = fullfile(getenv('USERPROFILE'), 'Documents_COPY', 'arc-bridge');
-    project_dir = 'C:\Users\Ruben\Documents_COPY\LeggedRobots\Final_Project\arc-bridge';
+    project_dir = fullfile(getenv('USERPROFILE'), 'Documents_COPY', 'arc-bridge');
+    project_dir = 'C:\Users\Ruben\Documents_COPY'
 
     
 elseif strcmp(person_select,'Pranav')
@@ -73,8 +73,8 @@ end
 
 %% 2. Setup LCM
 % !!! IMPORTANT: Replace with your actual channel names !!!
-STATE_CHANNEL = 'unitree_a1_state'; 
-CONTROL_CHANNEL = 'unitree_a1_control';
+STATE_CHANNEL = 'A1_STATE'; 
+CONTROL_CHANNEL = 'A1_CONTROL';
 
 lc = lcm.lcm.LCM.getSingleton();
 
