@@ -62,8 +62,8 @@ end
 
 %% 2. Setup LCM
 % !!! IMPORTANT: Replace with your actual channel names !!!
-STATE_CHANNEL = 'A1_STATE'; 
-CONTROL_CHANNEL = 'A1_CONTROL';
+STATE_CHANNEL = 'unitree_a1_state'; 
+CONTROL_CHANNEL = 'unitree_a1_control';
 
 lc = lcm.lcm.LCM.getSingleton();
 
