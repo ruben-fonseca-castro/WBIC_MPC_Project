@@ -1,0 +1,22 @@
+package lcm_msgs;
+
+struct xbox_command_t
+{
+    int64_t timestamp;
+    
+    // Left Stick
+    double left_stick_x;
+    double left_stick_y;
+    
+    // Right Stick
+    double right_stick_x;
+    double right_stick_y;
+    
+    // Buttons (0 = released, 1 = pressed)
+    int8_t a;
+    int8_t b;
+    int8_t x;
+    int8_t y;
+    int8_t lb; // Left bumper
+    int8_t rb; // Right bumper
+}
