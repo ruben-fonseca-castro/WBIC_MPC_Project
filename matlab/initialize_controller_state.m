@@ -25,12 +25,22 @@ function params = initialize_controller_state()
 
     % --- PD Gains ---
     kp = 20.0;
-    kd = 1.0;
+    kd = 0.2;
     params.KP_vec = ones(12, 1) * kp;
     params.KD_vec = ones(12, 1) * kd;
 
     % --- Initial Joystick State ---
     params.joy_state.left_stick_y = 0.0;
     params.joy_state.right_stick_x = 0.0;
+
+    % Flag to detect the first run
+    params.is_initialized = false; 
+    
+    % This will store our "intermediate step"
+    params.q_des_ramping = zeros(12, 1); 
+    
+    % Max change in angle per loop (rad/loop)
+    % 0.002 rad/loop * 1000 loops/s = 2 rad/s joint speed.
+    params.max_step_size = 0.002;
 
 end

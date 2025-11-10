@@ -36,9 +36,9 @@ while true
         continue;
     end
 
-    % --- 2b. Run the "Brain" (Controller Logic) ---
-    % This is the "mini-block" you will swap out for your WBC
-    [tau_cmd, contact_state] = run_pd_controller(state, params);
+    % --- 2b. Run the Controller ---
+    [tau_cmd, contact_state] = run_wbc_controller(state, params);
+    % [tau_cmd, contact_state] = run_pd_controller(state, params);
 
     % --- 2c. Publish the command ---
     publish_control_command(lc, params.control_msg, tau_cmd, contact_state, params);
