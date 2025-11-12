@@ -1,4 +1,4 @@
-function [tau_cmd, contact_state, params] = run_wbc_controller(state, params)
+function [tau_cmd, contact_state, params] = run_wbic_controller(state, params)
     % This is the "Whole-Body Impulse Controller" (WBC) brain.
     % It minimizes a weighted sum of tasks:
     % 1. (HIGH) Stance Foot: Keep feet from accelerating.

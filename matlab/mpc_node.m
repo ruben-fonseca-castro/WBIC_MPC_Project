@@ -4,18 +4,18 @@ format compact;
 
 addpath('utils/');
 
-disp('--- MPC Controller (The "Planner") ---');
+disp('--- MPC Controller ---');
 
-%% 1. Setup Paths & Parameters
-% Add all helper functions from the 'a1_controller' folder
-addpath(genpath(pwd)); 
-person_select = 'David';
-setup_paths(person_select); % Re-use your path setup function
+%% 1. Setup
+disp('Setting up paths...');
+person_select = 'David'; % ('David' or 'Ruben' or 'Pranav')
+setup_paths(person_select);
 
-% We call this *only* to get the channel names
-params = initialize_controller_state(); 
+disp('Initializing controller...');
+% Use a struct to hold all controller parameters
+params = initialize_controller_state();
 
-%% 2. Setup LCM (Independent of the WBC)
+disp('Setting up LCM...');
 lc = lcm.lcm.LCM.getSingleton();
 
 % Subscribe ONLY to the state channel
@@ -26,7 +26,7 @@ lc.subscribe(params.STATE_CHANNEL, agg_state);
 disp(['Listening for state on: ' params.STATE_CHANNEL]);
 disp(['Publishing plan on: ' params.PLAN_CHANNEL]);
 
-%% 3. Setup MPC
+%% 2. Setup MPC
 mpc_freq = 40; % 40 Hz, as per the paper
 dt = 1.0 / mpc_freq;
 
@@ -37,11 +37,11 @@ plan_msg = lcm_msgs.mpc_plan_t();
 MASS = 9.0; % Approx. mass of A1
 GRAVITY = 9.81;
 
-%% 4. Main MPC Loop
+%% 3. Main MPC Loop
 while true
     loop_start_time = tic;
     
-    % --- 4a. Get Current Robot State ---
+    % --- a. Get Current Robot State ---
     msg = agg_state.getNextMessage(0); 
     if isempty(msg)
         % Wait for next cycle if no state message
@@ -54,8 +54,7 @@ while true
     end
     state = lcm_msgs.unitree_a1_state_t(msg.data);
 
-    % --- 4b. Run MPC Logic (The "Planner") ---
-    %
+    % --- b. Run MPC Logic ---
     % For now, we will create a "dummy" plan just for STANDING.
     
     % 1. Contact state: All 4 feet on the ground
