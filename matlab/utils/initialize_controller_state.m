@@ -12,11 +12,12 @@ function params = initialize_controller_state()
     params.STATE_CHANNEL = 'unitree_a1_state'; 
     params.CONTROL_CHANNEL = 'unitree_a1_control';
     params.JOYSTICK_CHANNEL = 'XBOX_COMMAND';
+    params.PLAN_CHANNEL = 'MPC_PLAN'; % <-- **THIS WAS MISSING**
     
     % --- Re-usable LCM Message ---
     params.control_msg = lcm_msgs.unitree_a1_control_t();
 
-    % --- Desired Pose ---
+    % --- Desired Pose (for WBC secondary task) ---
     params.q_des_base = [0, 0.9, -1.8, ... % FR
                          0, 0.9, -1.8, ... % FL
                          0, 0.9, -1.8, ... % RR
@@ -25,22 +26,22 @@ function params = initialize_controller_state()
 
     % --- PD Gains ---
     kp = 20.0;
-    kd = 0.2;
+    kd = 1.0; % <-- NOTE: I returned this to 1.0 for the WBC
     params.KP_vec = ones(12, 1) * kp;
     params.KD_vec = ones(12, 1) * kd;
 
     % --- Initial Joystick State ---
     params.joy_state.left_stick_y = 0.0;
     params.joy_state.right_stick_x = 0.0;
-
-    % Flag to detect the first run
+    
+    % --- Initial MPC Plan ---
+    params.mpc_plan = struct(); % <-- **THIS WAS MISSING**
+    
+    % --- Setpoint Ramping ---
     params.is_initialized = false; 
-    
-    % This will store our "intermediate step"
     params.q_des_ramping = zeros(12, 1); 
+    params.max_step_size = 0.002; 
     
-    % Max change in angle per loop (rad/loop)
-    % 0.002 rad/loop * 1000 loops/s = 2 rad/s joint speed.
-    params.max_step_size = 0.002;
-
+    % --- Controller State Machine ---
+    params.wbc_enabled = true; % <-- Set to true to run WBC
 end

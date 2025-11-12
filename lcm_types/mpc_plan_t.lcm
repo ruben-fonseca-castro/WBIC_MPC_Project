@@ -1,0 +1,25 @@
+package lcm_msgs;
+
+struct mpc_plan_t
+{
+    // The timestamp
+    int64_t timestamp;
+
+    // The contact schedule [4x1]
+    // 1.0 for stance, 0.0 for swing
+    double contact[4];
+
+    // The desired reaction forces [12x1]
+    // (f_x, f_y, f_z) for each of the 4 feet
+    double reaction_force[12];
+    
+    // Desired body state (from MPC's plan)
+    double body_pos_cmd[3];
+    double body_rpy_cmd[3];
+    double body_vel_cmd[3];
+    double body_omega_cmd[3];
+    
+    // Desired foot positions [12x1]
+    // (p_x, p_y, p_z) for each of the 4 feet
+    double foot_pos_cmd[12];
+}

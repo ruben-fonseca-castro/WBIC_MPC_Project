@@ -24,18 +24,19 @@ function setup_paths(person_select)
     end
 
     % --- Add the paths to the Java Classpath ---
-    a1_types_path = fullfile(project_dir, 'arc_bridge', 'arc_bridge', 'lcm_msgs', 'lcm_msgs.jar');
-    current_path = javaclasspath('-dynamic');
+    
+    a1_types_path = fullfile(project_dir, 'arc_bridge', 'lcm_msgs', 'lcm_msgs.jar');
+    
+    % current_path = javaclasspath('-dynamic');
+    current_path = javaclasspath;
 
     % Check and add main LCM library
-    if ~any(strcmp(current_path, lcm_lib_path))
+    if ~any(endsWith(current_path, lcm_lib_path))
         javaaddpath(lcm_lib_path);
-        disp('Added LCM library to path.');
     end
 
     % Check and add A1 message types
-    if ~any(strcmp(current_path, a1_types_path))
+    if ~any(endsWith(current_path, a1_types_path))
         javaaddpath(a1_types_path);
-        disp('Added A1 message types to path.');
     end
 end
