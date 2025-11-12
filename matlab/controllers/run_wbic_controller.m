@@ -1,12 +1,6 @@
 function [tau_cmd, contact_state, params] = run_wbic_controller(state, params)
-    % This is the "Whole-Body Impulse Controller" (WBC) brain.
-    % It minimizes a weighted sum of tasks:
-    % 1. (HIGH) Stance Foot: Keep feet from accelerating.
-    % 2. (HIGH) Pose Task: Track the desired body/joint acceleration.
-    % 3. (LOW) Force Task: Track the desired forces from the MPC.
-    
     %% --- 1. Check for MPC Plan ---
-    if ~isfield(params.mpc_plan, 'reaction_force')
+    if ~isjava(params.mpc_plan)
         tau_cmd = zeros(12,1);
         contact_state = [0; 0; 0; 0];
         return;
@@ -62,9 +56,18 @@ function [tau_cmd, contact_state, params] = run_wbic_controller(state, params)
     % Task 2: Pose (High Priority)
     % Goal: q_ddot = q_ddot_des
     pos_error = params.q_des_ramping - q_pos_curr;
+
     vel_error = params.q_vel_des - q_vel_curr;
     q_j_ddot_des = params.KP_vec .* pos_error + params.KD_vec .* vel_error;
     q_ddot_des = [zeros(6,1); q_j_ddot_des];
+
+    % Calculate body position error
+    pos_des = params.mpc_plan.body_pos_cmd;
+    pos_curr = state.position;
+    pos_error_body = pos_des - pos_curr; % Error = Desired - Current
+    
+    % Display the error to the console
+    fprintf('Body Pos Error (x,y,z): %+6.3f, %+6.3f, %+6.3f\n', pos_error_body);
     
     w_pose = 1.0;
     A_pose = [eye(18), zeros(18, 12)]; % (18x30)

@@ -35,7 +35,7 @@ function params = initialize_controller_state()
     params.joy_state.right_stick_x = 0.0;
     
     % --- Initial MPC Plan ---
-    params.mpc_plan = struct(); % <-- **THIS WAS MISSING**
+    params.mpc_plan = struct();
     
     % --- Setpoint Ramping ---
     params.is_initialized = false; 
