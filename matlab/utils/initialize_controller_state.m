@@ -1,32 +1,30 @@
 function params = initialize_controller_state()
-    % This function creates a struct 'params' that holds all
-    % persistent controller variables and settings.
-
-    params = struct(); % Initialize empty struct
+    params = struct(); 
 
     % --- Control Timing ---
-    params.control_freq = 1000; % Hz
+    params.control_freq = 1000; 
     params.dt = 1.0 / params.control_freq;
 
     % --- LCM Channels ---
     params.STATE_CHANNEL = 'unitree_a1_state'; 
     params.CONTROL_CHANNEL = 'unitree_a1_control';
     params.JOYSTICK_CHANNEL = 'XBOX_COMMAND';
-    params.PLAN_CHANNEL = 'MPC_PLAN'; % <-- **THIS WAS MISSING**
+    params.PLAN_CHANNEL = 'MPC_PLAN'; 
     
-    % --- Re-usable LCM Message ---
     params.control_msg = lcm_msgs.unitree_a1_control_t();
 
-    % --- Desired Pose (for WBC secondary task) ---
-    params.q_des_base = [0, 0.9, -1.8, ... % FR
-                         0, 0.9, -1.8, ... % FL
-                         0, 0.9, -1.8, ... % RR
-                         0, 0.9, -1.8]';   % RL
+    % --- Desired Pose (Upright "Suggestion") ---
+    % Hip Pitch = 0.6, Knee Pitch = -1.2
+    params.q_des_base = [0, 1.6, -1.2, ... % FR
+                         0, 1.6, -1.2, ... % FL
+                         0, 2.0, -1.2, ... % RR
+                         0, 2.0, -1.2]';   % RL
+                         
     params.q_vel_des = zeros(12, 1);
 
     % --- PD Gains ---
-    kp = 20.0;
-    kd = 1.0; % <-- NOTE: I returned this to 1.0 for the WBC
+    kp = 5.0;
+    kd = 0.5; 
     params.KP_vec = ones(12, 1) * kp;
     params.KD_vec = ones(12, 1) * kd;
 
@@ -37,11 +35,6 @@ function params = initialize_controller_state()
     % --- Initial MPC Plan ---
     params.mpc_plan = struct();
     
-    % --- Setpoint Ramping ---
-    params.is_initialized = false; 
-    params.q_des_ramping = zeros(12, 1); 
-    params.max_step_size = 0.002; 
-    
     % --- Controller State Machine ---
-    params.wbc_enabled = true; % <-- Set to true to run WBC
+    params.wbc_enabled = true; 
 end

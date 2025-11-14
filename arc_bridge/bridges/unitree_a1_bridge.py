@@ -62,12 +62,6 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
             [-0.183,  0.047, 0]  # RL
         ])
 
-        # --- Contact Estimation (Ported from tron1) ---
-        # Note: You'll need to adapt this if you use Pinocchio
-        # self.P_hat = np.zeros(self.pin_model.nv) # estimated generalized momentum
-        # self.Ko = 100 # observer gain
-        # self.contact_threshold = -4
-        # self.selection_mat = np.eye(self.pin_model.nv, self.num_motor, k=-6)
 
         # --- Signal Smoothing ---
         self.se_filter = MovingWindowFilter(window_size=10, dim=6)
@@ -110,6 +104,8 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
         self.vis_vel_est = se_state_smoothed[3:]
         self.vis_R_body = R_body_to_world
 
+        # print(f"Est Pos-Z: {se_state_smoothed[2]:.3f}  |  Est Vel-Z: {se_state_smoothed[5]:.3f}")
+
         # Write estimated states into low_state
         self.low_state.position[2] = se_state_smoothed[2]
         self.low_state.velocity[:] = se_state_smoothed[3:]
@@ -130,38 +126,51 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
             vf (np.array(4, 3)): Foot velocities in body frame [FR, FL, RR, RL]
         """
         
-        l1 = 0.08505 # abad to hip
-        l2 = 0.2   # hip to knee
-        l3 = 0.2   # knee to foot
+        # Get trunk (body) orientation and position from MuJoCo
+        torso_id = mujoco.mj_name2id(self.mj_model, mujoco._enums.mjtObj.mjOBJ_BODY, self.torso_name)
+        p_body_world = self.mj_data.xpos[torso_id]
+        R_body_to_world = self.mj_data.xmat[torso_id].reshape((3, 3))
+        R_world_to_body = R_body_to_world.T
 
-        qj_pos_np = np.array(self.low_state.qj_pos).reshape((4, 3))
-        qj_vel_np = np.array(self.low_state.qj_vel).reshape((4, 3))
-        th1, th2, th3 = qj_pos_np[:, 0], qj_pos_np[:, 1], qj_pos_np[:, 2]
-        dth1, dth2, dth3 = qj_vel_np[:, 0], qj_vel_np[:, 1], qj_vel_np[:, 2]
+        pf_body_list = []
+        vf_body_list = []
+        
+        # Full (18-dim) velocity vector from MuJoCo
+        qvel_full = self.mj_data.qvel 
 
-        p_foot = np.array([-l1 - l3*np.sin(th2 + th3) - l2*np.sin(th2),
-                           np.sin(th1)*(l3*np.cos(th2 + th3) + l2*np.cos(th2)),
-                           -np.cos(th1)*(l3*np.cos(th2 + th3) + l2*np.cos(th2))]).T
+        for i in range(self.num_legs):
+            # Get IDs for this leg
+            geom_id = mujoco.mj_name2id(self.mj_model, mujoco._enums.mjtObj.mjOBJ_SITE, self.foot_geom_names[i])
+            link_id = mujoco.mj_name2id(self.mj_model, mujoco._enums.mjtObj.mjOBJ_BODY, self.foot_link_names[i])
+            
+            # --- 1. Calculate Position ---
+            # Get foot position in world frame
+            p_foot_world = self.mj_data.site_xpos[geom_id]
+            
+            # Transform to body frame
+            p_foot_body = R_world_to_body @ (p_foot_world - p_body_world)
+            pf_body_list.append(p_foot_body)
 
-        v_foot = np.array([-l2*dth2*np.cos(th2) - l3*dth2*np.cos(th2 + th3) - l3*dth3*np.cos(th2 + th3),
-                           l2*dth1*np.cos(th1)*np.cos(th2) 
-                           - l2*dth2*np.sin(th1)*np.sin(th2) 
-                           + l3*dth1*np.cos(th1)*np.cos(th2)*np.cos(th3) 
-                           - l3*dth1*np.cos(th1)*np.sin(th2)*np.sin(th3) 
-                           - l3*dth2*np.cos(th2)*np.sin(th1)*np.sin(th3) 
-                           - l3*dth2*np.cos(th3)*np.sin(th1)*np.sin(th2) 
-                           - l3*dth3*np.cos(th2)*np.sin(th1)*np.sin(th3) 
-                           - l3*dth3*np.cos(th3)*np.sin(th1)*np.sin(th2),
-                           l2*dth1*np.sin(th1)*np.cos(th2) 
-                           + l2*dth2*np.cos(th1)*np.sin(th2) 
-                           + l3*dth1*np.sin(th1)*np.cos(th2)*np.cos(th3) 
-                           + l3*dth2*np.cos(th1)*np.cos(th2)*np.sin(th3) 
-                           + l3*dth2*np.cos(th1)*np.cos(th3)*np.sin(th2) 
-                           + l3*dth3*np.cos(th1)*np.cos(th2)*np.sin(th3) 
-                           + l3*dth3*np.cos(th1)*np.cos(th3)*np.sin(th2) 
-                           - l3*dth1*np.sin(th1)*np.sin(th2)*np.sin(th3)]).T
-
-        return p_foot + self.hip_pos_body_frame, v_foot
+            # --- 2. Calculate Velocity ---
+            # Get (3, nv) linear Jacobian for the foot in the world frame
+            J_foot_lin_world = np.zeros((3, self.mj_model.nv))
+            mujoco.mj_jac(self.mj_model, self.mj_data, J_foot_lin_world, None, p_foot_world, link_id)
+            
+            # Get linear velocity of the foot in the world frame
+            v_foot_world = J_foot_lin_world @ qvel_full
+            
+            # Get linear velocity of the *body* in the world frame
+            v_body_world = self.mj_data.qvel[0:3]
+            
+            # Get angular velocity of the *body* in the body frame
+            omega_body = self.mj_data.qvel[3:6]
+            
+            # Transform foot velocity from world to body frame using the transport theorem
+            # v_foot_body = R_world_to_body @ (v_foot_world - v_body_world) - np.cross(omega_body, p_foot_body)
+            v_foot_body = R_world_to_body @ (v_foot_world - v_body_world) - np.cross(omega_body, p_foot_body)
+            vf_body_list.append(v_foot_body)
+            
+        return np.array(pf_body_list), np.array(vf_body_list)
 
     def parse_robot_specific_low_state(self, backend="mujoco"):
         """
@@ -278,3 +287,58 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
         self.low_state.omega[:] = msg.omega
         self.low_state.quaternion[:] = msg.quaternion
         self.low_state.rpy[:] = msg.rpy
+
+    def lcm_control_handler(self, channel, data):
+        """
+        Handles incoming control messages from the MATLAB controller.
+        
+        This function implements the paper's final control law:
+        tau_final = tau_pd + tau_ff
+        tau_pd = Kp(q_cmd - q) + Kd(q_dot_cmd - q_dot)
+        
+        This tau_final is then sent to MuJoCo.
+        """
+        if self.mj_data is None:
+            return # Don't run if simulation isn't ready
+
+        try:
+            # 1. Decode the message from MATLAB
+            msg = unitree_a1_control_t.decode(data)
+            
+            if msg is None:
+                return
+
+            # 2. Get all 3 command components as numpy arrays
+            q_j_cmd   = np.array(msg.qj_pos)
+            q_j_vel_cmd = np.array(msg.qj_vel)
+            tau_ff    = np.array(msg.qj_tau) # Feedforward torque
+
+            # 3. Get the gains from the message
+            kp = np.array(msg.kp)
+            kd = np.array(msg.kd)
+
+            # 4. Get the *current* state from the simulation
+            # (This is populated by your state estimator)
+            q_pos_curr = np.array(self.low_state.qj_pos)
+            q_vel_curr = np.array(self.low_state.qj_vel)
+
+            # 5. --- IMPLEMENT THE PD CONTROLLER ---
+            # Calculate the position and velocity error
+            pos_error = q_j_cmd - q_pos_curr
+            vel_error = q_j_vel_cmd - q_vel_curr
+            
+            # Calculate the PD torque
+            tau_pd = kp * pos_error + kd * vel_error
+            
+            # 6. --- THIS IS THE FINAL COMMAND ---
+            # Add the feedforward torque from your QP
+            tau_final = tau_pd + tau_ff
+            
+            # 7. Apply the final, total torque to MuJoCo's actuators
+            self.mj_data.ctrl[:] = tau_final
+            
+            # Also store the contact state for the state estimator
+            self.low_cmd.contact = msg.contact
+
+        except Exception as e:
+            print(f"Error in lcm_control_handler: {e}")
