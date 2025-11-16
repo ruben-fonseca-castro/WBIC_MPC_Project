@@ -54,7 +54,6 @@ while true
     % --- a. Get Current Robot State ---
     state_msg = agg_state.getNextMessage(0); 
     if isempty(state_msg)
-        %... (wait code) ...
         elapsed_time = toc(loop_start_time);
         time_to_wait = dt - elapsed_time;
         if time_to_wait > 0
@@ -67,9 +66,12 @@ while true
     % --- b. Get Current Joystick State ---
     joy_msg = agg_joy.getNextMessage(0);
     if ~isempty(joy_msg)
+        % (This assumes your xbox_command_t has all 4 fields)
         joy_lcm = lcm_msgs.xbox_command_t(joy_msg.data);
+        joy_state.left_stick_x = joy_lcm.left_stick_x;
         joy_state.left_stick_y = joy_lcm.left_stick_y;
         joy_state.right_stick_x = joy_lcm.right_stick_x;
+        joy_state.right_stick_y = joy_lcm.right_stick_y;
     end
 
     % --- c. Latch initial state on first loop ---
@@ -91,18 +93,21 @@ while true
 
     % 3. Body commands
     
-    % Position: Hold initial X/Y, hold 0.3m height
+    % --- POSITION (Left Stick) ---
+    % Commands a target X/Y offset from the initial position
     body_pos_cmd = initial_pos; 
+    body_pos_cmd(1) = initial_pos(1) - joy_state.left_stick_y * 0.3; % Forward/Back (+/- 30cm)
+    body_pos_cmd(2) = initial_pos(2) - joy_state.left_stick_x * 0.2; % Left/Right (+/- 20cm)
     body_pos_cmd(3) = 0.30; % Target height
 
-    % Orientation: Hold initial Yaw, use joystick for Roll/Pitch
+    % --- ORIENTATION (Right Stick) ---
+    % Commands a target roll/pitch angle
     body_rpy_cmd = zeros(3,1);
-    body_rpy_cmd(3) = initial_rpy(3); % Hold yaw
+    body_rpy_cmd(3) = initial_rpy(3); % Hold initial yaw
+    body_rpy_cmd(2) = -joy_state.right_stick_y * 0.4; % Pitch (+/- 0.4 rad)
+    body_rpy_cmd(1) = -joy_state.right_stick_x * 0.3; % Roll (+/- 0.3 rad)
     
-    % --- ADD JOYSTICK INPUT TO THE PLAN ---
-    body_rpy_cmd(2) = body_rpy_cmd(2) + joy_state.left_stick_y * 0.5; % Pitch
-    body_rpy_cmd(1) = body_rpy_cmd(1) + joy_state.right_stick_x * 0.3; % Roll
-    
+    % --- Velocities ---
     body_vel_cmd = zeros(3,1);
     body_omega_cmd = zeros(3,1);
     foot_pos_cmd = zeros(12,1); 

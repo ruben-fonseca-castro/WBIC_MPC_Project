@@ -50,7 +50,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             J_pre_2_pos = J_task_body * N_prev_pos;
             J_pinv_2_pos = pinv(J_pre_2_pos);
             
-            % --- JOYSTICK LOGIC REMOVED ---
             rpy_des_kin = params.mpc_plan.body_rpy_cmd;
             
             e_2_pos = [params.mpc_plan.body_pos_cmd - state.position; 
@@ -61,6 +60,8 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             delta_q_prev = delta_q_2;
             N_prev_pos = N_2_pos;
 
+            %{
+
             % Task 3 (Joint)
             J_pre_3_pos = J_task_joint * N_prev_pos;
             J_pinv_3_pos = pinv(J_pre_3_pos);
@@ -69,9 +70,12 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             delta_q_j = delta_q_3(7:18);
             q_j_cmd = q_pos_curr + delta_q_j;
 
+            %}
+
             % --- 3b. Velocity Hierarchy (Eq. 17) ---
             q_dot_cmd_prev = zeros(18, 1);
             N_prev_vel = eye(18);
+
             % Task 1 (Contact)
             J_pre_1_vel = J_task_contact * N_prev_vel;
             J_pinv_1_vel = pinv(J_pre_1_vel);
@@ -80,6 +84,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             N_1_vel = N_prev_vel * (eye(18) - J_pinv_1_vel * J_pre_1_vel);
             q_dot_cmd_prev = q_dot_cmd_1;
             N_prev_vel = N_1_vel;
+
             % Task 2 (Body)
             J_pre_2_vel = J_task_body * N_prev_vel;
             J_pinv_2_vel = pinv(J_pre_2_vel);
@@ -88,6 +93,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             N_2_vel = N_prev_vel * (eye(18) - J_pinv_2_vel * J_pre_2_vel);
             q_dot_cmd_prev = q_dot_cmd_2;
             N_prev_vel = N_2_vel;
+
+
+            %{
+
             % Task 3 (Joint)
             J_pre_3_vel = J_task_joint * N_prev_vel;
             J_pinv_3_vel = pinv(J_pre_3_vel);
@@ -95,10 +104,12 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             q_dot_cmd_3 = q_dot_cmd_prev + J_pinv_3_vel * (x_dot_des_3 - J_pre_3_vel * q_dot_cmd_prev);
             q_j_vel_cmd = q_dot_cmd_3(7:18);
 
+            %}
 
             %% --- 4. ACCELERATION Hierarchy (Eq 18) ---
             q_ddot_cmd_prev = zeros(18, 1);
             N_prev = eye(18);
+
             % --- TASK 1: Stance Foot Contact ---
             J_pre_1 = J_task_contact * N_prev;
             J_bar_dyn_1 = dynamic_pinv(J_pre_1, H);
@@ -118,7 +129,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             vel_des = params.mpc_plan.body_vel_cmd;
             acc_pos_des = kp_pos * (pos_des - state.position) + kd_pos * (vel_des - state.velocity);
             
-            % --- JOYSTICK LOGIC REMOVED ---
             rpy_des_dyn = params.mpc_plan.body_rpy_cmd; 
             
             omega_des = params.mpc_plan.body_omega_cmd;
@@ -129,6 +139,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             N_2 = N_prev * (eye(18) - J_pinv_2 * J_pre_2);
             q_ddot_cmd_prev = q_ddot_cmd_2;
             N_prev = N_2;
+
+            q_ddot_cmd = q_ddot_cmd_prev;
+            
+            %{
 
             % --- TASK 3: Joint Posture (Eq. 22) ---
             J_pre_3 = J_task_joint * N_prev;
@@ -142,6 +156,8 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             x_ddot_cmd_task3 = KP_vec_task3 .* pos_error_joints + KD_vec_task3 .* vel_error_joints;
             q_ddot_cmd_3 = q_ddot_cmd_prev + J_bar_dyn_3 * (x_ddot_cmd_task3 - J_pre_3 * q_ddot_cmd_prev);
             q_ddot_cmd = q_ddot_cmd_3;
+
+            %}
 
             %% --- 5. STEP 3: Hybrid QP Solver (Eq. 25) ---
             w_a_f = 10.0;  % Prioritize acceleration
