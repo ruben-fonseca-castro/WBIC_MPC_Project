@@ -24,7 +24,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         JcT_f = J_c(:, 1:6)';   
         JcT_j = J_c(:, 7:18)';  
 
-        %% --- 2. Check for MPC Plan (Generate Mock if Missing) ---
+        %% --- 2. Check for MPC Plan ---
         % If the MPC node is off, we generate a static "Stand" plan here
         % so the WBIC can still solve for balance using the QP.
         
