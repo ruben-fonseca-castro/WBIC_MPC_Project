@@ -7,17 +7,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
     contact_state = zeros(4,1);
     
     try
-        %% --- 1. Check for MPC Plan ---
-        if ~isjava(params.mpc_plan)
-            fprintf('No MPC plan received yet. Commanding zero torques.\n');
-            return;
-        end
-        
-        %% --- 2. Get State & Dynamics ---
-        f_r_mpc = params.mpc_plan.reaction_force;
-        contact_cmd = params.mpc_plan.contact;
-        contact_state = contact_cmd; 
-        
+        %% --- 1. Get State & Dynamics ---
         q_pos_curr = state.qj_pos;
         q_vel_curr = state.qj_vel;
         
@@ -25,6 +15,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         C = state.bias_force;                     
         J_c = reshape(state.J_gc, [12, 18]);      
         
+        % Split Dynamics Matrices
         H_f = H(1:6, :);       
         H_ff = H(1:6, 1:6);    
         H_j = H(7:18, :);      
@@ -32,18 +23,57 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         C_j = C(7:18);        
         JcT_f = J_c(:, 1:6)';   
         JcT_j = J_c(:, 7:18)';  
+
+        %% --- 2. Check for MPC Plan (Generate Mock if Missing) ---
+        % If the MPC node is off, we generate a static "Stand" plan here
+        % so the WBIC can still solve for balance using the QP.
+        
+        if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
+            % Define Constants (Matching mpc_node.m)
+            MASS = 9.0; 
+            GRAVITY = 9.81;
+            f_z_per_foot = (MASS * GRAVITY) / 4;
+            
+            % Create a Mock Plan Struct (Mimics lcm_msgs.mpc_plan_t)
+            mock_plan = struct();
+            
+            % 1. Contact & Forces: All feet on ground, equal weight dist.
+            mock_plan.contact = [1; 1; 1; 1];
+            mock_plan.reaction_force = [0; 0; f_z_per_foot; ... % FR
+                                        0; 0; f_z_per_foot; ... % FL
+                                        0; 0; f_z_per_foot; ... % RR
+                                        0; 0; f_z_per_foot];    % RL
+            
+            % 2. Body Reference:
+            % Keep current XY to prevent drifting, force safe Z height
+            mock_plan.body_pos_cmd = [state.position(1); state.position(2); 0.28]; 
+            mock_plan.body_rpy_cmd = [0; 0; 0]; % Force flat orientation
+            mock_plan.body_vel_cmd = zeros(3, 1);
+            mock_plan.body_omega_cmd = zeros(3, 1);
+            
+            % 3. Foot Reference:
+            % Lock feet to their current location (prevents stepping)
+            mock_plan.foot_pos_cmd = state.p_gc; 
+            
+            % Overwrite the params.mpc_plan with our mock struct
+            params.mpc_plan = mock_plan;
+        end
+        
+        %% --- 3. Run Full WBIC ---
+        % Get commands from plan (Real or Mock)
+        f_r_mpc = params.mpc_plan.reaction_force;
+        contact_cmd = params.mpc_plan.contact;
+        contact_state = contact_cmd; 
         
         J_task_body = [eye(6), zeros(6, 12)];
         J_task_joint = [zeros(12, 6), eye(12)];
         
-        % Get current foot positions from state (world frame)
-        p_gc_curr = reshape(state.p_gc, [3, 4]); % (3x4)
+        % Get foot positions
+        p_gc_curr = reshape(state.p_gc, [3, 4]); 
+        % Note: reshape works on both Java arrays and Matlab vectors
+        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); 
+        v_gc_des = zeros(3, 4); 
         
-        % Get target foot positions from MPC (world frame)
-        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); % (3x4)
-        v_gc_des = zeros(3, 4); % (Assuming zero swing vel for now)
-        
-
         %% --- 3. KINEMATIC Hierarchies (DYNAMICALLY BUILT) ---
         
         % --- 3a. Position Hierarchy (Eq. 16) ---
