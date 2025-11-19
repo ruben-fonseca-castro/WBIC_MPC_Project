@@ -26,7 +26,7 @@ function [state, joy_state, mpc_plan, new_data] = read_lcm_messages(agg_state, a
         joy_state.right_stick_x = joy_lcm.right_stick_x;
         new_data.joy_received = true;
         
-        fprintf('Joystick Received: L_Y=%.2f, R_X=%.2f\n', joy_lcm.left_stick_y, joy_lcm.right_stick_x);
+        % fprintf('Joystick Received: L_Y=%.2f, R_X=%.2f\n', joy_lcm.left_stick_y, joy_lcm.right_stick_x);
     end
     
     % --- 3. Check for MPC Plan Message --- <-- **NEW SECTION**
