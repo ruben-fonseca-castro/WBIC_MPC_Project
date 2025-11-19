@@ -1,385 +1,350 @@
 clc;
 clear;
-clear functions;
+clear functions; 
 format compact;
 
 addpath('utils/');
 addpath('controllers/');
 
-disp('--- MPC Controller Node (with Gait Scheduler) ---');
+disp('--- MPC Controller Node (Stable Wide Trot) ---');
 
-%% 1. Setup
-disp('Setting up paths...');
-person_select = 'David'; 
-setup_paths(person_select);
+%% ========================================================================
+%% 1. CONFIGURATION & PARAMETERS
+%% ========================================================================
 
-disp('Initializing controller state (for params)...');
-params = initialize_controller_state();
+TEST_TROT_IN_PLACE = true; 
 
-disp('Setting up LCM...');
-lc = lcm.lcm.LCM.getSingleton();
-
-agg_state = lcm.lcm.MessageAggregator();
-agg_state.setMaxMessages(1);
-lc.subscribe(params.STATE_CHANNEL, agg_state);
-
-agg_joy = lcm.lcm.MessageAggregator();
-agg_joy.setMaxMessages(1);
-lc.subscribe(params.JOYSTICK_CHANNEL, agg_joy);
-
-disp(['Listening for state on: ' params.STATE_CHANNEL]);
-disp(['Listening for joystick on: ' params.JOYSTICK_CHANNEL]);
-disp(['Publishing plan on: ' params.PLAN_CHANNEL]);
-
-%% 2. Setup MPC
-mpc_freq = 40; % 40 Hz
-dt = 1.0 / mpc_freq;
-
-plan_msg = lcm_msgs.mpc_plan_t();
-MASS = 9.0; 
+MASS = 12.45; 
 GRAVITY = 9.81;
 
-% --- Gait Scheduler Parameters ---
-T_cycle = 0.5; % Gait cycle time (seconds)
-stance_percent = 0.5; % 50% stance, 50% swing
-T_stance = T_cycle * stance_percent;
-swing_height = 0.08; % 8cm swing height
-phase_offsets = [0.0, 0.5, 0.5, 0.0]; % FR, FL, RR, RL
+% FIX 1: WIDER STANCE (Add 0.05m width)
+% This gives the robot a wider base to stop the side-to-side rocking
+HIP_OFFSET_Y = 0.047;
+THIGH_OFFSET_Y = 0.085;
+WIDTH_Y = HIP_OFFSET_Y + THIGH_OFFSET_Y + 0.08;
+LENGTH_X = 0.183;
 
-% --- Step Planner Parameters ---
-k_raibert = 0.03; 
-p_shoulders_body = [ 0.183, -0.047, 0; ... % FR
-                     0.183,  0.047, 0; ... % FL
-                    -0.183, -0.047, 0; ... % RR
-                    -0.183,  0.047, 0]';  % (3x4)
+p_shoulders_body = [ LENGTH_X, -WIDTH_Y, 0; ... 
+                     LENGTH_X,  WIDTH_Y, 0; ... 
+                    -LENGTH_X, -WIDTH_Y, 0; ... 
+                    -LENGTH_X,  WIDTH_Y, 0]';   
 
-% --- MPC Horizon and Cost Parameters (STEP 1) ---
-N_horizon = 10; % MPC planning horizon (the 'm' in Eq 10)
-x_size = 12;    % State size [Theta, p, omega, p_dot]
-u_size = 12;    % Control size [f_1, f_2, f_3, f_4]
-MU = 0.7;       % Friction coefficient (for Eq 11)
+% FIX 2: CHANGE TIMING
+gait_trot = struct();
+gait_trot.T_cycle = 0.5;
+gait_trot.stance_percent = 0.55; 
+gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0]; 
 
-% Cost matrices (Eq 10)
-Q = diag([ ...
-    5.0, 5.0, 1.0, ...   % Theta (RPY)
-    10.0, 10.0, 20.0, ... % Position (p) - more penalty on Z
-    0.1, 0.1, 0.1, ...   % Omega (Angular Vel)
-    1.0, 1.0, 1.0 ...    % Velocity (p_dot)
-]);
+current_gait = gait_trot;
 
-R_leg = 0.0001; 
+% Tuning
+k_raibert = 0.15; % Was 0.08
+swing_height = 0.10;    
+cmd_body_height = 0.28; 
+
+% MPC Solver
+mpc_freq = 40; 
+dt = 1.0 / mpc_freq; 
+N_horizon = 10;
+MU = 0.6; 
+
+Q = diag([20.0, 30.0, 5.0, 10.0, 10.0, 50.0, 0.1, 0.1, 0.1, 1.0, 1.0, 1.0]);
+R_leg = 1e-4;
 R = diag(repmat([R_leg, R_leg, R_leg], 1, 4));
 
-% --- Dynamics Helper Variables ---
-g_vec = [0; 0; -GRAVITY]; 
-g_hat_vec = [zeros(9, 1); g_vec * dt];
+FSM_STAND = 0;       
+FSM_LOCOMOTION = 1;  
+current_fsm_state = FSM_STAND; 
 
-% Body Inertia (from Unitree A1 URDF, simplified)
+%% ========================================================================
+%% 2. SETUP & INITIALIZATION
+%% ========================================================================
+
+disp('Setting up paths & LCM...');
+person_select = 'David'; 
+setup_paths(person_select);
+params = initialize_controller_state();
+
+lc = lcm.lcm.LCM.getSingleton();
+agg_state = lcm.lcm.MessageAggregator(); agg_state.setMaxMessages(1);
+agg_joy = lcm.lcm.MessageAggregator();   agg_joy.setMaxMessages(1);
+lc.subscribe(params.STATE_CHANNEL, agg_state);
+lc.subscribe(params.JOYSTICK_CHANNEL, agg_joy);
+
+plan_msg = lcm_msgs.mpc_plan_t();
+
 I_body = diag([0.025, 0.064, 0.080]);
 I_body_inv = inv(I_body);
+g_vec = [0; 0; -GRAVITY];
+g_hat_vec = [zeros(9, 1); g_vec * dt];
 
-%% 3. Main MPC Loop
-disp('Waiting for first state message...');
 is_initialized = false;
-initial_pos = zeros(3,1);
-initial_rpy = zeros(3,1);
-joy_state = params.joy_state; 
 gait_timer = 0.0;
-foot_pos_start = zeros(3, 4); % (3x4)
+current_cmd_pos = zeros(3,1); 
+current_cmd_yaw = 0.0;       
+foot_pos_start = zeros(3, 4); 
+debug_cnt = 0;  
 
+joy = struct('left_stick_x',0,'left_stick_y',0,'right_stick_x',0,'right_stick_y',0);
+
+disp('Waiting for robot state...');
+
+%% ========================================================================
+%% 3. MAIN CONTROL LOOP
+%% ========================================================================
 while true
     loop_start_time = tic;
     
-    % --- a. Get State and Joystick ---
+    % --- A. Read Inputs ---
     state_msg = agg_state.getNextMessage(0); 
     if isempty(state_msg)
-        elapsed_time = toc(loop_start_time);
-        time_to_wait = dt - elapsed_time;
-        if time_to_wait > 0, pause(time_to_wait); end
-        continue;
+        pause(0.001); continue; 
     end
     state = lcm_msgs.unitree_a1_state_t(state_msg.data);
     
     joy_msg = agg_joy.getNextMessage(0);
     if ~isempty(joy_msg)
-        joy_lcm = lcm_msgs.xbox_command_t(joy_msg.data);
-        joy_state.left_stick_x = joy_lcm.left_stick_x;
-        joy_state.left_stick_y = joy_lcm.left_stick_y;
-        joy_state.right_stick_x = joy_lcm.right_stick_x;
-        joy_state.right_stick_y = joy_lcm.right_stick_y;
+        joy = lcm_msgs.xbox_command_t(joy_msg.data);
     end
 
-    % --- b. Latch initial state ---
+    % --- B. First Run Initialization ---
     if ~is_initialized
-        initial_pos = state.position;
-        initial_rpy = state.rpy;
+        current_cmd_pos = state.position;
+        current_cmd_pos(3) = cmd_body_height; 
+        current_cmd_yaw = state.rpy(3);
         foot_pos_start = reshape(state.p_gc, [3, 4]);
         is_initialized = true;
-        disp('MPC Initialized. Starting Gait Scheduler.');
-    end
-    
-    % --- c. Update Gait Timer ---
-    gait_timer = gait_timer + dt;
-    if gait_timer > T_cycle
-        gait_timer = mod(gait_timer, T_cycle);
+        disp('MPC Initialized. Starting in FSM_STAND.');
     end
 
-    % --- d. Get User Commands ---
-    % Left stick controls velocity in the *body frame*
-    v_des_body_x = -joy_state.left_stick_y * 0.5; % Forward/Back
-    v_des_body_y = -joy_state.left_stick_x * 0.3; % Strafe Left/Right
-    v_des_body = [v_des_body_x; v_des_body_y; 0];
+    % --- C. FSM Logic ---
+    if TEST_TROT_IN_PLACE
+        current_fsm_state = FSM_LOCOMOTION;
+        v_des_world = zeros(3, 1);
+        body_omega_cmd = zeros(3, 1);
+        des_yaw_rate = 0;
+    else
+        joy_vec = [joy.left_stick_x, joy.left_stick_y, joy.right_stick_x];
+        move_req = (norm(joy_vec) > 0.1);
+        
+        switch current_fsm_state
+            case FSM_STAND
+                if move_req, current_fsm_state = FSM_LOCOMOTION; end
+            case FSM_LOCOMOTION
+                time_left = current_gait.T_cycle - gait_timer;
+                if ~move_req && (time_left < dt*2)
+                    current_fsm_state = FSM_STAND;
+                    gait_timer = 0.0;
+                end
+        end
+        
+        v_des_body = [-joy.left_stick_y * 0.6; -joy.left_stick_x * 0.3; 0];
+        des_yaw_rate = -joy.right_stick_x * 1.0;
+        yaw = state.rpy(3);
+        R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
+        v_des_world = R_z * v_des_body;
+        body_omega_cmd = [0; 0; des_yaw_rate];
+    end
 
-    % Right stick controls orientation
-    % X-axis controls yaw *rate* (steering)
-    des_yaw_rate = -joy_state.right_stick_x * 0.8; % Turn Left/Right
-    % Y-axis controls pitch *angle*
-    des_pitch_angle = -joy_state.right_stick_y * 0.4; % Look Up/Down
-    % We always want to keep roll angle at 0
-    des_roll_angle = 0.0;
+    % --- D. State Execution ---
+    if current_fsm_state == FSM_STAND
+        current_cmd_pos(1) = state.position(1);
+        current_cmd_pos(2) = state.position(2);
+        current_cmd_pos(3) = cmd_body_height;
+        current_cmd_yaw = state.rpy(3);
+        contact_cmd = [1; 1; 1; 1];
+    else
+        gait_timer = mod(gait_timer + dt, current_gait.T_cycle);
+        current_cmd_pos = current_cmd_pos + v_des_world * dt;
+        current_cmd_pos(3) = cmd_body_height; 
+        current_cmd_yaw = current_cmd_yaw + des_yaw_rate * dt;
+    end
     
-    % --- Convert body-frame velocity to world-frame velocity ---
-    % This is critical for the MPC and the footstep planner
-    current_yaw = state.rpy(3);
-    Rz_yaw = [cos(current_yaw), -sin(current_yaw), 0;
-              sin(current_yaw),  cos(current_yaw), 0;
-                     0,         0, 1];
-    
-    v_des_world = Rz_yaw * v_des_body;
-    
-    % --- e. Run Scheduler and Planner ---
-    contact_cmd = zeros(4, 1);
+    body_pos_cmd = current_cmd_pos;
+    body_vel_cmd = v_des_world;
+    body_rpy_cmd = [0; 0; current_cmd_yaw];
+
+    % --- E. Gait Scheduler ---
+    yaw = state.rpy(3);
+    R_yaw = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
     foot_pos_cmd_world = zeros(12, 1);
     foot_vel_cmd_world = zeros(12, 1);
     
-    % R_yaw = eul2rotm([initial_rpy(3), 0, 0], 'XYZ');
-    
-    % FIX: Define R_yaw manually to avoid toolbox dependency
-    yaw = initial_rpy(3);
-    R_yaw = [cos(yaw), -sin(yaw), 0;
-             sin(yaw),  cos(yaw), 0;
-                    0,         0, 1];
-    
-    for i = 1:4 % For each leg
-        % 1. GAIT SCHEDULER
-        [contact, swing_phase] = get_gait_schedule(gait_timer, T_cycle, stance_percent, phase_offsets(i));
-        contact_cmd(i) = contact;
-        
-        if contact == 1 % STANCE
-            % Stance leg: command it to stay at its current position
-            current_foot_pos = state.p_gc(3*i-2 : 3*i);
-            foot_pos_start(:, i) = current_foot_pos;
-            foot_pos_cmd_world(3*i-2 : 3*i) = current_foot_pos;
-        else % SWING
-            % 2. STEP PLANNER
-            p_shoulder_world = state.position + R_yaw * p_shoulders_body(:, i);
-            p_target = get_footstep_target(state, v_des_world, p_shoulder_world, T_stance, k_raibert);
+    if current_fsm_state == FSM_STAND
+        foot_pos_cmd_world = state.p_gc; 
+    else
+        for i = 1:4
+            [contact, swing_phase] = get_gait_schedule(gait_timer, current_gait.T_cycle, current_gait.stance_percent, current_gait.phase_offsets(i));
+            contact_cmd(i) = contact;
             
-            % 3. TRAJECTORY GENERATOR
-            T_swing = T_cycle * (1.0 - stance_percent);
-            [p_swing, v_swing] = get_swing_trajectory(swing_phase, foot_pos_start(:, i), p_target, swing_height, T_swing);
-            
-            foot_pos_cmd_world(3*i-2 : 3*i) = p_swing;
-            foot_vel_cmd_world(3*i-2 : 3*i) = v_swing;
+            if contact == 1
+                foot_pos_start(:, i) = state.p_gc(3*i-2 : 3*i);
+                foot_pos_cmd_world(3*i-2 : 3*i) = foot_pos_start(:, i);
+                foot_vel_cmd_world(3*i-2 : 3*i) = zeros(3, 1);
+            else
+                p_shoulder = state.position + R_yaw * p_shoulders_body(:, i);
+                
+                p_target = get_footstep_target_aggressive(state, ...
+                                                          v_des_world, ... 
+                                                          body_omega_cmd, ...
+                                                          p_shoulder, ...
+                                                          current_gait.T_cycle * current_gait.stance_percent, ...
+                                                          k_raibert, ...
+                                                          cmd_body_height, GRAVITY);
+                                                      
+                p_target(3) = foot_pos_start(3, i); 
+                T_swing = current_gait.T_cycle * (1 - current_gait.stance_percent);
+                
+                [p_swing, v_swing] = get_swing_traj_cosine(swing_phase, foot_pos_start(:, i), p_target, swing_height, T_swing);
+                
+                foot_pos_cmd_world(3*i-2 : 3*i) = p_swing;
+                foot_vel_cmd_world(3*i-2 : 3*i) = v_swing;
+            end
         end
     end
-    
-    % --- g. Body Commands ---
-    % (We need these desired commands *before* the MPC)
-    
-    % Desired position: constant height above initial
-    body_pos_cmd = initial_pos + [0; 0; 0.1];
-    
-    % Desired RPY angles: relative to initial, with joystick pitch
-    body_rpy_cmd = initial_rpy + [des_roll_angle; des_pitch_angle; 0];
-    
-    % Desired linear velocity: from our joystick calculation
-    body_vel_cmd = v_des_world;
-    
-    % Desired angular velocity: THIS IS THE KEY FIX
-    % We command 0 roll/pitch *rate* (to hold the angle)
-    % and the desired yaw *rate* (for steering)
-    body_omega_cmd = [0; 0; des_yaw_rate];
-    
-    % --- f. Build and Solve MPC ---
 
-    % AGGRESSIVE FIX: Force MATLAB to re-read all function files
-    % from disk on every loop iteration.
-    clear functions; 
-
-    % --- 2.1. Get Current State ---
+    % --- F. MPC Solver ---
     x_current = [state.rpy; state.position; state.omega; state.velocity];
-    p_feet_world_mat = reshape(state.p_gc, [3, 4]);
-
-    % --- 2.2. Generate Reference Trajectory & Contact Schedule ---
+    x_size = 12; u_size = 12;
+    n_vars = (N_horizon + 1) * (x_size + u_size);
     x_ref_traj = zeros(x_size, N_horizon + 1);
     contact_plan = zeros(4, N_horizon + 1);
-
-    for k = 0:N_horizon % k=0 is current time, k=1...N is future
-        k_idx = k + 1; % MATLAB 1-based indexing
+    
+    for k = 0:N_horizon
+        t_pred = k * dt;
+        ref_pos = body_pos_cmd + body_vel_cmd * t_pred;
+        ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred;
+        x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd];
         
-        current_timer = gait_timer + k * dt;
-        if current_timer > T_cycle
-            current_timer = mod(current_timer, T_cycle);
+        if current_fsm_state == FSM_STAND
+             contact_plan(:, k+1) = [1;1;1;1];
+        else
+             t_future = mod(gait_timer + t_pred, current_gait.T_cycle);
+             for leg = 1:4
+                 [c, ~] = get_gait_schedule(t_future, current_gait.T_cycle, current_gait.stance_percent, current_gait.phase_offsets(leg));
+                 contact_plan(leg, k+1) = c;
+             end
         end
-        
-        % Generate future contact plan
-        for i = 1:4
-            [contact, ~] = get_gait_schedule(current_timer, T_cycle, stance_percent, phase_offsets(i));
-            contact_plan(i, k_idx) = contact;
-        end
-        
-        % Generate future reference state (x_ref)
-        
-        % Desired linear velocity is constant
-        ref_vel = body_vel_cmd; 
-        
-        % Desired angular velocity is constant
-        ref_omega = body_omega_cmd;
-        
-        % Desired position is integrated forward from k=0
-        % body_pos_cmd is the desired pos at k=0
-        ref_pos = body_pos_cmd + body_vel_cmd * (k * dt);
-        
-        % Desired orientation is integrated forward from k=0
-        % body_rpy_cmd is the desired RPY at k=0
-        % (Simple Euler integration)
-        ref_rpy = body_rpy_cmd + body_omega_cmd * (k * dt);
-        
-        x_ref_traj(:, k_idx) = [ref_rpy; ref_pos; ref_omega; ref_vel];
     end
-
-    % --- 3.1. Pre-allocate QP Matrices ---
-    n_states = (N_horizon + 1) * x_size;
-    n_controls = (N_horizon + 1) * u_size;
-    n_vars = n_states + n_controls;
-
-    H = sparse(n_vars, n_vars);
-    f_vec = sparse(n_vars, 1);
-    A_eq = sparse(n_vars, n_vars);
-    b_eq = sparse(n_vars, 1);
-
-    n_ineq_per_step = 5 * 4; 
-    n_ineq = (N_horizon + 1) * n_ineq_per_step;
-    A_ineq = sparse(n_ineq, n_vars);
-    b_ineq = sparse(n_ineq, 1);
-
-    x_idx = @(k) (k-1)*x_size + (1:x_size); % Indices for x(k)
-    u_idx = @(k) n_states + (k-1)*u_size + (1:u_size); % Indices for f(k-1)
-
-    % --- 3.2. Build Cost (H, f_vec) ---
+    
+    H = sparse(n_vars, n_vars); f_vec = sparse(n_vars, 1);
+    A_eq = sparse(n_vars, n_vars); b_eq = sparse(n_vars, 1);
+    A_ineq = sparse((N_horizon+1)*20, n_vars); b_ineq = sparse((N_horizon+1)*20, 1);
+    
+    x_idx = @(k) (k-1)*x_size + (1:x_size);
+    u_idx = @(k) (N_horizon+1)*x_size + (k-1)*u_size + (1:u_size);
+    ineq_row = 1;
+    
     for k = 1:(N_horizon + 1)
-        H(x_idx(k), x_idx(k)) = Q;
-        H(u_idx(k), u_idx(k)) = R;
-    end
-    for k = 1:(N_horizon + 1)
+        H(x_idx(k), x_idx(k)) = Q; H(u_idx(k), u_idx(k)) = R;
         f_vec(x_idx(k)) = -Q * x_ref_traj(:, k);
-    end
-
-    % --- 3.3. Build Dynamics Constraints (A_eq, b_eq) ---
-    k_idx = 1; % Corresponds to time k=0
-    Ak = build_Ak(x_ref_traj(3, k_idx), dt); % Build Ak using ref yaw
-    Bk = build_Bk(MASS, I_body_inv, x_ref_traj(3, k_idx), state.position, p_feet_world_mat, dt, contact_plan(:, k_idx));
-
-    A_eq(x_idx(k_idx), x_idx(k_idx)) = eye(x_size); 
-    A_eq(x_idx(k_idx), u_idx(k_idx)) = -Bk;
-    b_eq(x_idx(k_idx)) = Ak * x_current + g_hat_vec;
-
-    for k = 1:N_horizon % k is the time step
-        k_idx = k + 1; % k_idx is the 1-based index
         
-        Ak = build_Ak(x_ref_traj(3, k_idx), dt); 
-        Bk = build_Bk(MASS, I_body_inv, x_ref_traj(3, k_idx), state.position, p_feet_world_mat, dt, contact_plan(:, k_idx));
-
-        A_eq(x_idx(k_idx), x_idx(k)) = -Ak;
-        A_eq(x_idx(k_idx), u_idx(k_idx)) = -Bk;
-        A_eq(x_idx(k_idx), x_idx(k_idx)) = eye(x_size);
-        b_eq(x_idx(k_idx)) = g_hat_vec;
-    end
-
-    % --- 3.4. Build Friction Cone Constraints (A_ineq, b_ineq) ---
-    ineq_row_idx = 1;
-    for k = 0:N_horizon % For each time step
-        k_idx = k + 1; % 1-based index
+        ref_yaw_k = x_ref_traj(3, k); 
+        ref_pos_k = x_ref_traj(4:6, k); 
+        Ak = build_Ak(ref_yaw_k, dt);
+        p_feet_mat = reshape(foot_pos_cmd_world, [3, 4]); 
+        Bk = build_Bk(MASS, I_body_inv, ref_yaw_k, ref_pos_k, p_feet_mat, dt, contact_plan(:, k));
         
-        for i = 1:4 % For each leg
-            f_z_min = 0.0; % Min force
-            
-            cone_matrix = [ -1,  0, -MU; ...
-                             1,  0, -MU; ...
-                             0, -1, -MU; ...
-                             0,  1, -MU; ...
-                             0,  0,  -1 ];
-            
-            cone_vector = [0; 0; 0; 0; -f_z_min];
-            
-            if contact_plan(i, k_idx) == 0
-                cone_matrix = zeros(5, 3);
-                cone_vector = zeros(5, 1);
-            end
-
-            leg_control_idx = u_idx(k_idx); 
-            leg_control_idx = leg_control_idx( (i-1)*3 + (1:3) ); 
-            
-            row_range = ineq_row_idx : (ineq_row_idx + 4);
-            
-            A_ineq(row_range, leg_control_idx) = cone_matrix;
-            b_ineq(row_range) = cone_vector;
-            
-            ineq_row_idx = ineq_row_idx + 5;
+        if k == 1 
+             A_eq(x_idx(k), x_idx(k)) = eye(12); A_eq(x_idx(k), u_idx(k)) = -Bk;
+             b_eq(x_idx(k)) = Ak * x_current + g_hat_vec;
+        else 
+             A_eq(x_idx(k), x_idx(k-1)) = -Ak; A_eq(x_idx(k), x_idx(k)) = eye(12);
+             A_eq(x_idx(k), u_idx(k)) = -Bk; b_eq(x_idx(k)) = g_hat_vec;
+        end
+        
+        for leg = 1:4
+             idx_leg = u_idx(k); idx_leg = idx_leg(3*leg-2 : 3*leg);
+             if contact_plan(leg, k) == 0
+                 row_range = ineq_row : ineq_row+4;
+                 A_ineq(row_range, idx_leg(3)) = [1; -1; 0; 0; 0]; b_ineq(row_range) = 0;
+             else
+                 cone_mat = [1 0 -MU; -1 0 -MU; 0 1 -MU; 0 -1 -MU; 0 0 -1];
+                 row_range = ineq_row : ineq_row+4;
+                 A_ineq(row_range, idx_leg) = cone_mat; b_ineq(row_range) = [0;0;0;0;0]; 
+             end
+             ineq_row = ineq_row + 5;
         end
     end
     
-    % --- 4. Solve the QP ---
-    options = optimoptions('quadprog', 'Display', 'none', 'Algorithm', 'interior-point-convex');
+    options = optimoptions('quadprog', 'Display', 'off', 'Algorithm', 'interior-point-convex');
+    [sol, ~, flag] = quadprog(H, f_vec, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
     
-    Z_opt = [];
-    try
-        [Z_opt, fval, exitflag] = quadprog(H, f_vec, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
-        if exitflag ~= 1
-            disp('QP failed to solve or is infeasible.');
-            Z_opt = [];
-        end
-    catch ME
-        disp('QP Error:');
-        disp(ME.message);
-        Z_opt = [];
-    end
+    if flag == 1, reaction_force_cmd = sol(u_idx(1));
+    else, reaction_force_cmd = zeros(12,1); reaction_force_cmd([3,6,9,12]) = MASS*GRAVITY/4; end
 
-    if ~isempty(Z_opt)
-        % Extract f(0), the forces for the *current* time step
-        f_0_opt = Z_opt(u_idx(1));
-        reaction_force_cmd = f_0_opt;
-    else
-        % QP Failed - Use mock forces as a fallback
-        disp('QP Failed, using mock forces.');
-        reaction_force_cmd = zeros(12, 1);
-        current_contacts = contact_plan(:, 1); % Contacts at k=0
-        num_stance = sum(current_contacts);
-
-        if num_stance > 0
-            f_z = (MASS * GRAVITY) / num_stance;
-            if current_contacts(1), reaction_force_cmd(3) = f_z; end
-            if current_contacts(2), reaction_force_cmd(6) = f_z; end
-            if current_contacts(3), reaction_force_cmd(9) = f_z; end
-            if current_contacts(4), reaction_force_cmd(12) = f_z; end
-        end
-    end
-    
-    % --- h. Publish the Plan ---
     plan_msg.timestamp = state.timestamp;
-    plan_msg.contact = contact_cmd; % Note: This is the *current* contact from scheduler
+    plan_msg.contact = contact_cmd;
     plan_msg.reaction_force = reaction_force_cmd;
     plan_msg.body_pos_cmd = body_pos_cmd;
     plan_msg.body_rpy_cmd = body_rpy_cmd;
     plan_msg.body_vel_cmd = body_vel_cmd;
     plan_msg.body_omega_cmd = body_omega_cmd;
     plan_msg.foot_pos_cmd = foot_pos_cmd_world;
+    try, plan_msg.foot_vel_cmd = foot_vel_cmd_world; catch, end
     
     lc.publish(params.PLAN_CHANNEL, plan_msg);
 
-    % --- i. Wait for 40 Hz cycle ---
-    elapsed_time = toc(loop_start_time);
-    time_to_wait = dt - elapsed_time;
-    if time_to_wait > 0, pause(time_to_wait); end
+    elapsed = toc(loop_start_time);
+    if elapsed < dt, pause(dt - elapsed); end
+    
+    % =========================================================================
+    % --- STABILITY MONITOR & LOGS ---
+    % =========================================================================
+    
+    rpy_err_deg = (state.rpy - body_rpy_cmd) * (180/pi); 
+    pos_err = state.position - body_pos_cmd;
+    
+    if (abs(rpy_err_deg(1)) > 30 || abs(rpy_err_deg(2)) > 30)
+        fprintf('\n!!! CRASH DETECTED !!!\n');
+        fprintf('Last State:\n');
+        fprintf('  Roll Err:  %.2f deg\n', rpy_err_deg(1));
+        fprintf('  Pitch Err: %.2f deg\n', rpy_err_deg(2));
+        fprintf('  Height:    %.3f m (Cmd: %.3f)\n', state.position(3), body_pos_cmd(3));
+        fprintf('--------------------------------\n');
+        pause(1); 
+    end
+
+    debug_cnt = debug_cnt + 1;
+    % FIX 3: Print every 17 loops (Prime Number) to see all phases
+    if mod(debug_cnt, 17) == 0
+        fprintf('-----------------------------------------------------------\n');
+        fprintf('T:%.2f | STATE: %d | CONTACT: [%d %d %d %d]\n', ...
+            gait_timer, current_fsm_state, contact_cmd);
+        fprintf('  STABILITY: RollErr=%.1f deg | PitchErr=%.1f deg\n', ...
+            rpy_err_deg(1), rpy_err_deg(2));
+        fprintf('  HEIGHT:    Cmd=%.3f | Act=%.3f | Err=%.3f\n', ...
+            body_pos_cmd(3), state.position(3), pos_err(3));
+        fprintf('  FR_FOOT:   CmdZ=%.3f | ActZ=%.3f | Diff=%.3f\n', ...
+            foot_pos_cmd_world(3), state.p_gc(3), foot_pos_cmd_world(3) - state.p_gc(3));
+        fprintf('-----------------------------------------------------------\n');
+    end
+end
+
+% --- LOCAL FUNCTIONS ---
+function [p, v] = get_swing_traj_cosine(phase, p_start, p_end, h, T_swing)
+    p_xy = (1-phase)*p_start(1:2) + phase*p_end(1:2);
+    v_xy = (p_end(1:2) - p_start(1:2)) / T_swing;
+    ground_z = (1-phase)*p_start(3) + phase*p_end(3);
+    p_z = ground_z + (h/2) * (1 - cos(2*pi*phase));
+    v_z = (h * pi / T_swing) * sin(2*pi*phase);
+    p = [p_xy; p_z]; v = [v_xy; v_z];
+end
+
+function [p_target] = get_footstep_target_aggressive(state, v_des, omega_des, p_shoulder, T_stance, k_raibert, current_height, gravity)
+    % 1. Symmetry (Feedforward)
+    p_symmetry = (T_stance / 2) * v_des; 
+    
+    % 2. Feedback (Raibert)
+    v_curr = state.velocity(1:3);
+    % Boost Lateral Feedback Gain (Y-axis) to stop swaying
+    gain_vector = [k_raibert; k_raibert * 2.0; 0]; 
+    p_feedback = gain_vector .* (v_curr - v_des);
+    
+    % 3. Centrifugal
+    coeff = 0.5 * sqrt(current_height / gravity);
+    p_centrifugal = coeff * cross(v_curr, omega_des);
+    
+    p_target = p_shoulder + p_symmetry + p_feedback + p_centrifugal;
+    p_target(3) = 0.0;
 end
