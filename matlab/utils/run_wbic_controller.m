@@ -34,8 +34,9 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
             center_x = mean(feet_x);
             center_y = mean(feet_y);
 
-            % Target: Centered over feet, 0.24m high
-            mock_plan.body_pos_cmd = [center_x; center_y; 0.24];
+            % Target: Centered over feet at specific height
+            height = 0.35;
+            mock_plan.body_pos_cmd = [center_x; center_y; height];
             mock_plan.body_rpy_cmd = [0;0;0];
             mock_plan.body_vel_cmd = zeros(3,1);
             mock_plan.body_omega_cmd = zeros(3,1);
@@ -97,7 +98,12 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         
         p_gc_curr = reshape(state.p_gc, [3, 4]); 
         p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); 
-        try, v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); catch, v_gc_des = zeros(3, 4); end
+
+        try 
+            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); 
+        catch
+            v_gc_des = zeros(3, 4); 
+        end
         
         q_dot_full = [state.velocity; state.omega; state.qj_vel];
         v_gc_act = J_c * q_dot_full; 
