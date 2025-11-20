@@ -6,10 +6,16 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
     contact_state = zeros(4,1);
     
     % Debug Counter
-    persistent wbic_cnt; 
+    persistent wbic_cnt;
     if isempty(wbic_cnt), wbic_cnt = 0; end
     wbic_cnt = wbic_cnt + 1;
     do_print = (mod(wbic_cnt, 20) == 0); % Print every 0.5s
+
+    % Persistent state for event-based contact detection
+    persistent prev_contact_state;
+    if isempty(prev_contact_state)
+        prev_contact_state = ones(4, 1);  % Start in stance
+    end
 
     try
         %% --- 1. Setup Dynamics ---
@@ -94,15 +100,39 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         
         f_r_mpc = params.mpc_plan.reaction_force;
         contact_cmd = params.mpc_plan.contact;
-        contact_state = contact_cmd; 
-        
-        p_gc_curr = reshape(state.p_gc, [3, 4]); 
-        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); 
 
-        try 
-            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); 
+        p_gc_curr = reshape(state.p_gc, [3, 4]);
+
+        %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
+        % Use force feedback to detect early touch-down during swing
+        force_threshold = 20.0;  % N - threshold for touch-down detection
+        contact_state = zeros(4, 1);
+
+        for leg = 1:4
+            % Extract foot force magnitude from reaction forces
+            idx = 3*leg-2:3*leg;
+            foot_force = norm(f_r_mpc(idx));
+
+            % Event-based override: if MPC commands swing BUT force detected -> switch to stance
+            if contact_cmd(leg) == 0 && foot_force > force_threshold
+                % Early touch-down detected!
+                contact_state(leg) = 1;
+            else
+                % Use MPC contact command
+                contact_state(leg) = contact_cmd(leg);
+            end
+        end
+
+        % Update previous contact state
+        prev_contact_state = contact_state;
+
+        % Use trajectories from MPC (already generated with Bézier/stance modulation)
+        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]);
+
+        try
+            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
         catch
-            v_gc_des = zeros(3, 4); 
+            v_gc_des = zeros(3, 4);
         end
         
         q_dot_full = [state.velocity; state.omega; state.qj_vel];
@@ -119,12 +149,25 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         
         % Paper Table I gains
         kp_base = 100; kd_base = 10;
-        kp_foot = 100; kd_foot = 10; 
+
+        % Gain scheduling: Use different gains for standing vs. locomotion
+        % Standing: Lower gains to avoid oscillations and noise amplification
+        % Locomotion: Higher gains (Hyun et al. 2014) for aggressive tracking
+        n_legs_in_contact = sum(contact_state);
+        if n_legs_in_contact == 4
+            % All feet in stance = standing mode
+            kp_foot = 100; kd_foot = 10;  % Original stable gains
+            gait_mode_str = 'STAND';
+        else
+            % Dynamic gait (trot, etc)
+            kp_foot = 450; kd_foot = 50;  % Hyun et al. (2014) aggressive gains
+            gait_mode_str = 'TROT';
+        end 
 
         % --- TASK 0: Stance Constraints ---
-        J_stance = []; 
+        J_stance = [];
         for i = 1:4
-            if contact_cmd(i) == 1, J_stance = [J_stance; J_c(3*i-2 : 3*i, :)]; end
+            if contact_state(i) == 1, J_stance = [J_stance; J_c(3*i-2 : 3*i, :)]; end
         end
         
         if ~isempty(J_stance)
@@ -166,7 +209,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         % --- TASK 3: Swing Foot ---
         J_swing = []; x_ddot_3 = [];
         for i = 1:4
-            if contact_cmd(i) == 0
+            if contact_state(i) == 0
                 J_swing = [J_swing; J_c(3*i-2 : 3*i, :)];
                 idx = 3*i-2 : 3*i;
                 p_err = p_gc_des(:, i) - p_gc_curr(:, i);
@@ -199,7 +242,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         
         A_swing_const = []; b_swing_const = [];
         for i = 1:4
-            if contact_cmd(i) == 0
+            if contact_state(i) == 0
                 f_idx_start = 6 + (i-1)*3 + 1;
                 A_sub = zeros(3, 18); A_sub(1:3, f_idx_start:f_idx_start+2) = eye(3);
                 A_swing_const = [A_swing_const; A_sub]; b_swing_const = [b_swing_const; 0; 0; 0];
@@ -229,8 +272,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         % ===================== WBIC DEBUG LOGGING =====================
         if do_print
             fprintf('\n================ WBIC DEBUG [%d] ================\n', wbic_cnt);
-            fprintf('Contact: [%d %d %d %d] | QP flag=%d %s\n', ...
-                contact_cmd, flag, wbic_qp_status(flag));
+            fprintf('Mode: %s | Gains: kp=%d kd=%d | QP flag=%d %s\n', ...
+                gait_mode_str, kp_foot, kd_foot, flag, wbic_qp_status(flag));
+            fprintf('Contact (cmd/actual): [%d %d %d %d] / [%d %d %d %d]\n', ...
+                contact_cmd, contact_state);
 
             fprintf('\n--- BODY ERRORS ---\n');
             fprintf('  Ori Err: [%.2f, %.2f, %.2f] deg (R,P,Y)\n', ori_err_deg);

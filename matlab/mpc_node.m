@@ -39,7 +39,7 @@ current_gait = gait_trot;
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
 swing_height = 0.10;
-cmd_body_height = 0.24;  % Reduced to match typical standing height 
+cmd_body_height = 0.35;  % Reduced to match typical standing height 
 
 % MPC Solver
 mpc_freq = 40; 
@@ -47,10 +47,7 @@ dt = 1.0 / mpc_freq;
 N_horizon = 10;
 MU = 0.6; 
 
-% State weights: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
-% HIGH orientation weights to force asymmetric forces for correction
-% Reduced pz weight (was 50) to prevent fighting nominal force
-Q = diag([150.0, 150.0, 10.0, 20.0, 20.0, 30.0, 1.0, 1.0, 0.5, 3.0, 3.0, 5.0]);
+% State weights will be set in main loop based on FSM state
 
 % Force weights - penalize total force magnitude, NOT distribution
 % This allows asymmetric forces for orientation control while keeping total near mg
@@ -91,10 +88,18 @@ g_hat_vec = [zeros(9, 1); g_vec * dt];
 
 is_initialized = false;
 gait_timer = 0.0;
-current_cmd_pos = zeros(3,1); 
-current_cmd_yaw = 0.0;       
-foot_pos_start = zeros(3, 4); 
-debug_cnt = 0;  
+current_cmd_pos = zeros(3,1);
+current_cmd_yaw = 0.0;
+foot_pos_start = zeros(3, 4);
+debug_cnt = 0;
+
+% Trajectory generation state tracking
+prev_contact_state = ones(4, 1);  % Start in stance
+touchdown_positions = zeros(3, 4);
+leg_phase_timers = zeros(4, 1);  % Time since last state change per leg
+standing_foot_positions = zeros(3, 4);  % Fixed positions for standing mode
+standing_positions_locked = false;  % Lock positions after settling
+lock_timer = 0;  % Force lock after N seconds if criteria not met  
 
 joy = struct('left_stick_x',0,'left_stick_y',0,'right_stick_x',0,'right_stick_y',0);
 
@@ -124,6 +129,8 @@ while true
         current_cmd_pos(3) = cmd_body_height;
         current_cmd_yaw = state.rpy(3);
         foot_pos_start = reshape(state.p_gc, [3, 4]);
+        touchdown_positions = foot_pos_start;  % Initialize touchdown positions
+        standing_foot_positions = foot_pos_start;  % Fixed positions for standing
         is_initialized = true;
 
         fprintf('\n========== MPC INITIALIZED ==========\n');
@@ -198,43 +205,82 @@ while true
     body_vel_cmd = v_des_world;
     body_rpy_cmd = [0; 0; current_cmd_yaw];
 
-    % --- E. Gait Scheduler ---
+    % --- D2. MPC Weight Scheduling Based on FSM State ---
+    % State weights: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
+    if current_fsm_state == FSM_STAND
+        % Standing: Lower orientation weights to reduce oscillations
+        % WBIC handles fine orientation control, MPC provides coarse stability
+        Q = diag([50.0, 50.0, 10.0, 20.0, 20.0, 50.0, 5.0, 5.0, 0.5, 3.0, 3.0, 5.0]);
+    else
+        % Locomotion: High orientation weights for aggressive correction
+        Q = diag([150.0, 150.0, 10.0, 20.0, 20.0, 30.0, 1.0, 1.0, 0.5, 3.0, 3.0, 5.0]);
+    end
+
+    % --- E. Gait Scheduler & Trajectory Generation (Paper Methods) ---
     yaw = state.rpy(3);
     R_yaw = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
     foot_pos_cmd_world = zeros(12, 1);
     foot_vel_cmd_world = zeros(12, 1);
-    
+
+    % Trajectory parameters (Hyun et al. 2014)
+    stance_delta = 0.02;  % m - vertical modulation for stance (Section III-C)
+
     if current_fsm_state == FSM_STAND
-        foot_pos_cmd_world = state.p_gc; 
+        % DISABLED LOCK-IN: Always use current foot positions (no locking)
+        % This tests if delayed lock-in was causing the pitch issues
+        standing_foot_positions = reshape(state.p_gc, [3, 4]);
+        foot_pos_cmd_world = reshape(standing_foot_positions, [12, 1]);
     else
         for i = 1:4
             [contact, swing_phase] = get_gait_schedule(gait_timer, current_gait.T_cycle, current_gait.stance_percent, current_gait.phase_offsets(i));
             contact_cmd(i) = contact;
-            
-            if contact == 1
-                foot_pos_start(:, i) = state.p_gc(3*i-2 : 3*i);
-                foot_pos_cmd_world(3*i-2 : 3*i) = foot_pos_start(:, i);
-                foot_vel_cmd_world(3*i-2 : 3*i) = zeros(3, 1);
+
+            % Update leg phase timers
+            if contact ~= prev_contact_state(i)
+                leg_phase_timers(i) = 0;  % Reset timer on state change
+                if contact == 1
+                    % Transitioning to stance: record touchdown position
+                    touchdown_positions(:, i) = state.p_gc(3*i-2 : 3*i);
+                end
             else
+                leg_phase_timers(i) = leg_phase_timers(i) + dt;
+            end
+
+            if contact == 1
+                % STANCE: Use equilibrium-point hypothesis (Hyun et al. Section III-C)
+                T_stance = current_gait.T_cycle * current_gait.stance_percent;
+                stance_phase = min(leg_phase_timers(i) / T_stance, 1.0);
+
+                [p_stance, v_stance] = get_stance_trajectory(...
+                    touchdown_positions(:, i), stance_phase, T_stance, stance_delta);
+
+                foot_pos_cmd_world(3*i-2 : 3*i) = p_stance;
+                foot_vel_cmd_world(3*i-2 : 3*i) = v_stance;
+            else
+                % SWING: Use Bézier curve trajectory (Hyun et al. Section III-B)
                 p_shoulder = state.position + R_yaw * p_shoulders_body(:, i);
-                
+
                 p_target = get_footstep_target_aggressive(state, ...
-                                                          v_des_world, ... 
+                                                          v_des_world, ...
                                                           body_omega_cmd, ...
                                                           p_shoulder, ...
                                                           current_gait.T_cycle * current_gait.stance_percent, ...
                                                           k_raibert, ...
                                                           cmd_body_height, GRAVITY);
-                                                      
-                p_target(3) = foot_pos_start(3, i); 
+
+                p_target(3) = touchdown_positions(3, i);  % Use previous touchdown height
                 T_swing = current_gait.T_cycle * (1 - current_gait.stance_percent);
-                
-                [p_swing, v_swing] = get_swing_traj_cosine(swing_phase, foot_pos_start(:, i), p_target, swing_height, T_swing);
-                
+
+                [p_swing, v_swing] = get_swing_trajectory_bezier(...
+                    touchdown_positions(:, i), p_target, swing_phase, swing_height, T_swing);
+
                 foot_pos_cmd_world(3*i-2 : 3*i) = p_swing;
                 foot_vel_cmd_world(3*i-2 : 3*i) = v_swing;
             end
         end
+
+        % Update previous contact state
+        prev_contact_state = contact_cmd;
     end
 
     % --- F. MPC Solver ---
