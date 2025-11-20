@@ -5,7 +5,14 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
     q_j_vel_cmd = zeros(12,1);
     contact_state = zeros(4,1);
     
+    % Debug Counter
+    persistent wbic_cnt; 
+    if isempty(wbic_cnt), wbic_cnt = 0; end
+    wbic_cnt = wbic_cnt + 1;
+    do_print = (mod(wbic_cnt, 20) == 0); % Print every 0.5s
+
     try
+        %% --- 1. Setup Dynamics ---
         q_pos_curr = state.qj_pos;
         H = reshape(state.inertia_mat, [18, 18]); 
         C = state.bias_force;                     
@@ -15,16 +22,72 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         C_f = C(1:6); C_j = C(7:18);        
         JcT_f = J_c(:, 1:6)'; JcT_j = J_c(:, 7:18)';  
 
+        %% --- 2. Setup MPC Plan (MOCK / STANDALONE) ---
         if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
-            MASS = 12.45; GRAVITY = 9.81; f_z = (MASS*GRAVITY)/4;
+            MASS = 12.45; GRAVITY = 9.81;
             mock_plan = struct();
             mock_plan.contact = [1;1;1;1];
-            mock_plan.reaction_force = repmat([0;0;f_z],4,1);
-            mock_plan.body_pos_cmd = [state.position(1); state.position(2); 0.28]; 
-            mock_plan.body_rpy_cmd = [0;0;0]; 
-            mock_plan.body_vel_cmd = zeros(3,1); mock_plan.body_omega_cmd = zeros(3,1);
-            mock_plan.foot_pos_cmd = state.p_gc; 
+
+            % Calculate center of support
+            feet_x = state.p_gc([1, 4, 7, 10]);
+            feet_y = state.p_gc([2, 5, 8, 11]);
+            center_x = mean(feet_x);
+            center_y = mean(feet_y);
+
+            % Target: Centered over feet, 0.24m high
+            mock_plan.body_pos_cmd = [center_x; center_y; 0.24];
+            mock_plan.body_rpy_cmd = [0;0;0];
+            mock_plan.body_vel_cmd = zeros(3,1);
+            mock_plan.body_omega_cmd = zeros(3,1);
+            mock_plan.foot_pos_cmd = state.p_gc;
             mock_plan.foot_vel_cmd = zeros(12,1);
+
+            % --- Compute reaction forces using QP (like simplified MPC) ---
+            % This distributes forces to achieve equilibrium + orientation correction
+            p_com = state.position;
+            p_feet = reshape(state.p_gc, [3, 4]);
+
+            % Build force distribution matrix
+            % [sum of forces = mg] and [sum of moments = desired moment]
+            A_fd = zeros(6, 12);
+            for i = 1:4
+                idx = (i-1)*3 + (1:3);
+                A_fd(1:3, idx) = eye(3);  % Force sum
+                r_i = p_feet(:, i) - p_com;
+                A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum
+            end
+
+            % Desired wrench: gravity compensation + orientation correction
+            % Add moment to correct pitch/roll errors (negative feedback)
+            kp_ori = 50;  % Orientation correction gain
+            % Negative sign: if pitched forward (+), apply backward moment (-)
+            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0];
+            b_fd = [0; 0; MASS * GRAVITY; desired_moment];
+
+            % QP to find forces: min ||f||^2 s.t. A*f = b, friction cone
+            H_fd = eye(12);
+            f_fd = zeros(12, 1);
+
+            % Friction cone constraints
+            mu = 0.6;
+            W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1];
+            A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg);
+            b_ineq_fd = zeros(20, 1);
+
+            opts = optimoptions('quadprog', 'Display', 'off');
+            [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts);
+
+            if exitflag == 1
+                mock_plan.reaction_force = f_sol;
+            else
+                % Fallback to equal forces
+                f_z = (MASS * GRAVITY) / 4;
+                mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1);
+                if do_print
+                    fprintf('[WBIC Standalone] Force distribution QP failed, using equal forces\n');
+                end
+            end
+
             params.mpc_plan = mock_plan;
         end
         
@@ -32,113 +95,189 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         contact_cmd = params.mpc_plan.contact;
         contact_state = contact_cmd; 
         
-        J_task_body = [eye(6), zeros(6, 12)];
-        
         p_gc_curr = reshape(state.p_gc, [3, 4]); 
         p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); 
+        try, v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); catch, v_gc_des = zeros(3, 4); end
         
-        try
-            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
-        catch
-            v_gc_des = zeros(3, 4);
-        end
-        
-        %% --- Kinematics ---
-        delta_q_prev = zeros(18, 1); N_prev = eye(18);
-        
-        % Task 1: Feet
-        J_1 = []; e_1 = [];
-        for i = 1:4 
-            J_leg = J_c(3*i-2 : 3*i, :);
-            if contact_cmd(i) == 1, e_leg = zeros(3, 1); 
-            else, e_leg = p_gc_des(:, i) - p_gc_curr(:, i); end
-            J_1 = [J_1; J_leg]; e_1 = [e_1; e_leg];
-        end
-        J_pre_1 = J_1 * N_prev; J_pinv_1 = pinv(J_pre_1);
-        delta_q_1 = delta_q_prev + J_pinv_1 * (e_1 - J_pre_1 * delta_q_prev);
-        N_1 = N_prev * (eye(18) - J_pinv_1 * J_pre_1);
-        delta_q_prev = delta_q_1; N_prev = N_1;
-        
-        % Task 2: Body
-        J_pre_2 = J_task_body * N_prev; J_pinv_2 = pinv(J_pre_2);
-        e_2 = [params.mpc_plan.body_pos_cmd - state.position; params.mpc_plan.body_rpy_cmd - state.rpy];
-        delta_q_2 = delta_q_prev + J_pinv_2 * (e_2 - J_pre_2 * delta_q_prev);
-        
-        q_j_cmd = q_pos_curr + delta_q_2(7:18);
-
-        %% --- Acceleration (Dynamics) ---
-        q_ddot_prev = zeros(18, 1); N_prev = eye(18);
         q_dot_full = [state.velocity; state.omega; state.qj_vel];
         v_gc_act = J_c * q_dot_full; 
 
-        % Task 1: Feet
-        x_ddot_1 = zeros(12, 1);
-        kp_swing = 800; kd_swing = 20; 
+        %% --- 3. KINEMATIC HIERARCHY ---
+        % Task 0: Stance Constraints (Hard)
+        % Task 1: Body Orientation (Highest Task)
+        % Task 2: Body Position
+        % Task 3: Swing Foot Position (Lowest)
         
+        q_ddot_prev = zeros(18, 1); 
+        N_prev = eye(18);
+        
+        % Paper Table I gains
+        kp_base = 100; kd_base = 10;
+        kp_foot = 100; kd_foot = 10; 
+
+        % --- TASK 0: Stance Constraints ---
+        J_stance = []; 
         for i = 1:4
-            idx = 3*i-2 : 3*i;
-            if contact_cmd(i) == 1
-                x_ddot_1(idx) = zeros(3,1);
-            else
-                pos_err = p_gc_des(:, i) - p_gc_curr(:, i);
-                vel_err = v_gc_des(:, i) - v_gc_act(idx); 
-                x_ddot_1(idx) = kp_swing * pos_err + kd_swing * vel_err;
+            if contact_cmd(i) == 1, J_stance = [J_stance; J_c(3*i-2 : 3*i, :)]; end
+        end
+        
+        if ~isempty(J_stance)
+            x_ddot_0 = zeros(size(J_stance, 1), 1); 
+            J_pre_0 = J_stance; J_bar_0 = dynamic_pinv(J_pre_0, H);
+            q_ddot_0 = J_bar_0 * x_ddot_0;
+            N_prev = eye(18) - J_bar_0 * J_pre_0; 
+            q_ddot_prev = q_ddot_0;
+        end
+
+        % --- TASK 1: Body Orientation ---
+        J_1 = [zeros(3,3), eye(3), zeros(3,12)]; 
+        rot_err = params.mpc_plan.body_rpy_cmd - state.rpy;
+        omega_err = params.mpc_plan.body_omega_cmd - state.omega;
+        x_ddot_1 = kp_base * rot_err + kd_base * omega_err;
+        
+        J_pre_1 = J_1 * N_prev; J_bar_1 = dynamic_pinv(J_pre_1, H);
+        q_ddot_1 = q_ddot_prev + J_bar_1 * (x_ddot_1 - J_pre_1 * q_ddot_prev);
+        J_pinv_1 = pinv(J_pre_1); N_prev = N_prev * (eye(18) - J_pinv_1 * J_pre_1);
+        q_ddot_prev = q_ddot_1; 
+        
+        % Store for debug
+        ori_err_deg = rot_err * 180/pi;
+
+        % --- TASK 2: Body Position ---
+        J_2 = [eye(3), zeros(3,3), zeros(3,12)]; 
+        pos_err = params.mpc_plan.body_pos_cmd - state.position;
+        vel_err = params.mpc_plan.body_vel_cmd - state.velocity;
+        x_ddot_2 = kp_base * pos_err + kd_base * vel_err;
+        
+        J_pre_2 = J_2 * N_prev; J_bar_2 = dynamic_pinv(J_pre_2, H);
+        q_ddot_2 = q_ddot_prev + J_bar_2 * (x_ddot_2 - J_pre_2 * q_ddot_prev);
+        J_pinv_2 = pinv(J_pre_2); N_prev = N_prev * (eye(18) - J_pinv_2 * J_pre_2);
+        q_ddot_prev = q_ddot_2;
+
+        % Store for debug
+        pos_err_m = pos_err;
+
+        % --- TASK 3: Swing Foot ---
+        J_swing = []; x_ddot_3 = [];
+        for i = 1:4
+            if contact_cmd(i) == 0
+                J_swing = [J_swing; J_c(3*i-2 : 3*i, :)];
+                idx = 3*i-2 : 3*i;
+                p_err = p_gc_des(:, i) - p_gc_curr(:, i);
+                v_err = v_gc_des(:, i) - v_gc_act(idx);
+                acc_swing = kp_foot * p_err + kd_foot * v_err;
+                x_ddot_3 = [x_ddot_3; acc_swing];
             end
         end
         
-        J_pre_1 = J_c * N_prev; J_bar_1 = dynamic_pinv(J_pre_1, H);
-        q_ddot_1 = q_ddot_prev + J_bar_1 * (x_ddot_1 - J_pre_1 * q_ddot_prev);
-        J_pinv_1 = pinv(J_pre_1); N_1 = N_prev * (eye(18) - J_pinv_1 * J_pre_1);
-        q_ddot_prev = q_ddot_1; N_prev = N_1;
+        if ~isempty(J_swing)
+            J_pre_3 = J_swing * N_prev; J_bar_3 = dynamic_pinv(J_pre_3, H);
+            q_ddot_3 = q_ddot_prev + J_bar_3 * (x_ddot_3 - J_pre_3 * q_ddot_prev);
+            q_ddot_cmd = q_ddot_3;
+        else
+            q_ddot_cmd = q_ddot_prev;
+        end
 
-        % --- Task 2: Body (VECTOR GAINS) ---
-        % FIX: Increase Pitch stiffness (kp_rot(2)) and Vertical stiffness (kp_pos(3))
-        kp_pos_vec = [200; 200; 800]; % Increase Z stiffness to 800
-        kd_pos_vec = [20; 20; 50];    % Increase Z damping
-        
-        % Increase Pitch (Y-axis rotation) stiffness significantly
-        kp_rot_vec = [400; 800; 400]; % Roll, Pitch, Yaw
-        kd_rot_vec = [30; 50; 30];
-        
-        pos_err = params.mpc_plan.body_pos_cmd - state.position;
-        vel_err = params.mpc_plan.body_vel_cmd - state.velocity;
-        
-        % Element-wise multiplication (.*) for vector gains
-        acc_pos = kp_pos_vec .* pos_err + kd_pos_vec .* vel_err;
-        
-        rot_err = params.mpc_plan.body_rpy_cmd - state.rpy;
-        omega_err = params.mpc_plan.body_omega_cmd - state.omega;
-        
-        % Use vector gains for rotation too
-        acc_rot = kp_rot_vec .* rot_err + kd_rot_vec .* omega_err;
-        
-        x_ddot_2 = [acc_pos; acc_rot];
-        
-        J_pre_2 = J_task_body * N_prev; J_bar_2 = dynamic_pinv(J_pre_2, H);
-        q_ddot_2 = q_ddot_prev + J_bar_2 * (x_ddot_2 - J_pre_2 * q_ddot_prev);
-        q_ddot_cmd = q_ddot_2;
+        % Joint Integration
+        dt_wbic = 0.002; 
+        q_j_acc = q_ddot_cmd(7:18);
+        q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
+        q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic;
 
-        %% --- QP Solver ---
-        w_a = 10.0; w_f = 0.001;
-        H_qp = 2 * blkdiag(w_a*eye(6), w_f*eye(12)); f_qp = zeros(18,1);
-        A_eq = [H_ff, -JcT_f]; b_eq = (JcT_f * f_r_mpc) - (H_f * q_ddot_cmd) - C_f;
-        mu = 0.6; 
-        W_foot = [ -1, 0, mu; 1, 0, mu; 0,-1, mu; 0, 1, mu; 0, 0,  1 ];
-        W = blkdiag(W_foot, W_foot, W_foot, W_foot);
+        %% --- 4. QP SOLVER ---
+        n_vars = 18; 
+        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6);   
+        H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1);
+        
+        A_dyn = [H_ff, -JcT_f]; b_dyn = (JcT_f * f_r_mpc) - (H_f * q_ddot_cmd) - C_f;
+        
+        A_swing_const = []; b_swing_const = [];
+        for i = 1:4
+            if contact_cmd(i) == 0
+                f_idx_start = 6 + (i-1)*3 + 1;
+                A_sub = zeros(3, 18); A_sub(1:3, f_idx_start:f_idx_start+2) = eye(3);
+                A_swing_const = [A_swing_const; A_sub]; b_swing_const = [b_swing_const; 0; 0; 0];
+            end
+        end
+        
+        A_eq = [A_dyn; A_swing_const]; b_eq = [b_dyn; b_swing_const];
+        
+        mu = 0.6;  % Match MPC friction coefficient
+        W_leg = [ -1, 0, mu; 1, 0, mu; 0,-1, mu; 0, 1, mu; 0, 0, 1 ];
+        W = blkdiag(W_leg, W_leg, W_leg, W_leg);
         A_ineq = [zeros(20, 6), -W]; b_ineq = W * f_r_mpc;
         
-        options = optimoptions('quadprog', 'Display', 'off');
-        [sol, ~, flag] = quadprog(H_qp, f_qp, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
+        options = optimoptions('quadprog', 'Display', 'off', 'Algorithm', 'interior-point-convex');
+        [x_sol, ~, flag] = quadprog(H_qp, f_qp, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
         
         if flag == 1
-            q_ddot_final = q_ddot_cmd;
-            q_ddot_final(1:6) = q_ddot_final(1:6) + sol(1:6);
-            f_r_final = f_r_mpc + sol(7:end);
+            delta_f = x_sol(1:6); delta_fr = x_sol(7:18);
+            f_r_final = f_r_mpc + delta_fr;
+            q_ddot_final = q_ddot_cmd; q_ddot_final(1:6) = q_ddot_final(1:6) + delta_f;
             tau_j = H_j * q_ddot_final + C_j - JcT_j * f_r_final;
         else
-            tau_j = zeros(12,1);
+            tau_j = C_j - JcT_j * f_r_mpc;
+            f_r_final = f_r_mpc;
         end
+
+        % ===================== WBIC DEBUG LOGGING =====================
+        if do_print
+            fprintf('\n================ WBIC DEBUG [%d] ================\n', wbic_cnt);
+            fprintf('Contact: [%d %d %d %d] | QP flag=%d %s\n', ...
+                contact_cmd, flag, wbic_qp_status(flag));
+
+            fprintf('\n--- BODY ERRORS ---\n');
+            fprintf('  Ori Err: [%.2f, %.2f, %.2f] deg (R,P,Y)\n', ori_err_deg);
+            fprintf('  Pos Err: [%.4f, %.4f, %.4f] m\n', pos_err_m);
+            fprintf('  Omega Err: [%.3f, %.3f, %.3f] rad/s\n', omega_err);
+            fprintf('  Vel Err: [%.3f, %.3f, %.3f] m/s\n', vel_err);
+
+            fprintf('\n--- TASK ACCELERATIONS ---\n');
+            fprintf('  Ori x_ddot: [%.2f, %.2f, %.2f] rad/s²\n', x_ddot_1);
+            fprintf('  Pos x_ddot: [%.2f, %.2f, %.2f] m/s²\n', x_ddot_2);
+
+            fprintf('\n--- REACTION FORCES (N) ---\n');
+            leg_names = {'FR', 'FL', 'RR', 'RL'};
+            for leg = 1:4
+                idx = 3*leg-2:3*leg;
+                fprintf('  %s: MPC=[%6.1f,%6.1f,%6.1f] -> Final=[%6.1f,%6.1f,%6.1f]\n', ...
+                    leg_names{leg}, f_r_mpc(idx), f_r_final(idx));
+            end
+
+            fprintf('\n--- JOINT TORQUES (Nm) ---\n');
+            fprintf('  FR: [%6.2f, %6.2f, %6.2f]\n', tau_j(1:3));
+            fprintf('  FL: [%6.2f, %6.2f, %6.2f]\n', tau_j(4:6));
+            fprintf('  RR: [%6.2f, %6.2f, %6.2f]\n', tau_j(7:9));
+            fprintf('  RL: [%6.2f, %6.2f, %6.2f]\n', tau_j(10:12));
+            fprintf('  Max |tau|: %.2f Nm\n', max(abs(tau_j)));
+
+            fprintf('\n--- JOINT COMMANDS ---\n');
+            fprintf('  q_j_cmd (deg): [');
+            fprintf('%.1f ', q_j_cmd * 180/pi);
+            fprintf(']\n');
+
+            fprintf('=================================================\n\n');
+        end
+        
     catch ME
-         disp(ME.message);
+         disp(['WBIC Error: ', ME.message]);
+         fprintf('Line: %d\n', ME.stack(1).line);
     end
+end
+
+function str = wbic_qp_status(flag)
+    switch flag
+        case 1, str = '(optimal)';
+        case 0, str = '(max iter)';
+        case -2, str = '(infeasible)';
+        case -3, str = '(unbounded)';
+        otherwise, str = sprintf('(code: %d)', flag);
+    end
+end
+
+function S = skew_matrix(v)
+    % Returns the skew-symmetric matrix for cross product: S*x = v x x
+    S = [  0,   -v(3),  v(2);
+         v(3),    0,  -v(1);
+        -v(2),  v(1),    0];
 end
