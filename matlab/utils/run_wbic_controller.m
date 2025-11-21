@@ -1,9 +1,10 @@
-function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_controller(state, params)
-    
+function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_wbic_controller(state, params)
+
     tau_j = zeros(12,1);
     q_j_cmd = state.qj_pos;
     q_j_vel_cmd = zeros(12,1);
     contact_state = zeros(4,1);
+    f_r_final = zeros(12,1);  % Initialize final forces output
     
     % Debug Counter
     persistent wbic_cnt;
@@ -29,74 +30,74 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         JcT_f = J_c(:, 1:6)'; JcT_j = J_c(:, 7:18)';  
 
         %% --- 2. Setup MPC Plan (MOCK / STANDALONE) ---
-        if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
-            MASS = 12.45; GRAVITY = 9.81;
-            mock_plan = struct();
-            mock_plan.contact = [1;1;1;1];
-
-            % Calculate center of support
-            feet_x = state.p_gc([1, 4, 7, 10]);
-            feet_y = state.p_gc([2, 5, 8, 11]);
-            center_x = mean(feet_x);
-            center_y = mean(feet_y);
-
-            % Target: Centered over feet at specific height
-            height = 0.35;
-            mock_plan.body_pos_cmd = [center_x; center_y; height];
-            mock_plan.body_rpy_cmd = [0;0;0];
-            mock_plan.body_vel_cmd = zeros(3,1);
-            mock_plan.body_omega_cmd = zeros(3,1);
-            mock_plan.foot_pos_cmd = state.p_gc;
-            mock_plan.foot_vel_cmd = zeros(12,1);
-
-            % --- Compute reaction forces using QP (like simplified MPC) ---
-            % This distributes forces to achieve equilibrium + orientation correction
-            p_com = state.position;
-            p_feet = reshape(state.p_gc, [3, 4]);
-
-            % Build force distribution matrix
-            % [sum of forces = mg] and [sum of moments = desired moment]
-            A_fd = zeros(6, 12);
-            for i = 1:4
-                idx = (i-1)*3 + (1:3);
-                A_fd(1:3, idx) = eye(3);  % Force sum
-                r_i = p_feet(:, i) - p_com;
-                A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum
-            end
-
-            % Desired wrench: gravity compensation + orientation correction
-            % Add moment to correct pitch/roll errors (negative feedback)
-            kp_ori = 50;  % Orientation correction gain
-            % Negative sign: if pitched forward (+), apply backward moment (-)
-            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0];
-            b_fd = [0; 0; MASS * GRAVITY; desired_moment];
-
-            % QP to find forces: min ||f||^2 s.t. A*f = b, friction cone
-            H_fd = eye(12);
-            f_fd = zeros(12, 1);
-
-            % Friction cone constraints
-            mu = 0.6;
-            W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1];
-            A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg);
-            b_ineq_fd = zeros(20, 1);
-
-            opts = optimoptions('quadprog', 'Display', 'off');
-            [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts);
-
-            if exitflag == 1
-                mock_plan.reaction_force = f_sol;
-            else
-                % Fallback to equal forces
-                f_z = (MASS * GRAVITY) / 4;
-                mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1);
-                if do_print
-                    fprintf('[WBIC Standalone] Force distribution QP failed, using equal forces\n');
-                end
-            end
-
-            params.mpc_plan = mock_plan;
-        end
+        % if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
+        %     MASS = 12.45; GRAVITY = 9.81;
+        %     mock_plan = struct();
+        %     mock_plan.contact = [1;1;1;1];
+        % 
+        %     % Calculate center of support
+        %     feet_x = state.p_gc([1, 4, 7, 10]);
+        %     feet_y = state.p_gc([2, 5, 8, 11]);
+        %     center_x = mean(feet_x);
+        %     center_y = mean(feet_y);
+        % 
+        %     % Target: Centered over feet at specific height
+        %     height = 0.35;
+        %     mock_plan.body_pos_cmd = [center_x; center_y; height];
+        %     mock_plan.body_rpy_cmd = [0;0;0];
+        %     mock_plan.body_vel_cmd = zeros(3,1);
+        %     mock_plan.body_omega_cmd = zeros(3,1);
+        %     mock_plan.foot_pos_cmd = state.p_gc;
+        %     mock_plan.foot_vel_cmd = zeros(12,1);
+        % 
+        %     % --- Compute reaction forces using QP (like simplified MPC) ---
+        %     % This distributes forces to achieve equilibrium + orientation correction
+        %     p_com = state.position;
+        %     p_feet = reshape(state.p_gc, [3, 4]);
+        % 
+        %     % Build force distribution matrix
+        %     % [sum of forces = mg] and [sum of moments = desired moment]
+        %     A_fd = zeros(6, 12);
+        %     for i = 1:4
+        %         idx = (i-1)*3 + (1:3);
+        %         A_fd(1:3, idx) = eye(3);  % Force sum
+        %         r_i = p_feet(:, i) - p_com;
+        %         A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum
+        %     end
+        % 
+        %     % Desired wrench: gravity compensation + orientation correction
+        %     % Add moment to correct pitch/roll errors (negative feedback)
+        %     kp_ori = 50;  % Orientation correction gain
+        %     % Negative sign: if pitched forward (+), apply backward moment (-)
+        %     desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0];
+        %     b_fd = [0; 0; MASS * GRAVITY; desired_moment];
+        % 
+        %     % QP to find forces: min ||f||^2 s.t. A*f = b, friction cone
+        %     H_fd = eye(12);
+        %     f_fd = zeros(12, 1);
+        % 
+        %     % Friction cone constraints
+        %     mu = 0.6;
+        %     W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1];
+        %     A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg);
+        %     b_ineq_fd = zeros(20, 1);
+        % 
+        %     opts = optimoptions('quadprog', 'Display', 'off');
+        %     [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts);
+        % 
+        %     if exitflag == 1
+        %         mock_plan.reaction_force = f_sol;
+        %     else
+        %         % Fallback to equal forces
+        %         f_z = (MASS * GRAVITY) / 4;
+        %         mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1);
+        %         if do_print
+        %             fprintf('[WBIC Standalone] Force distribution QP failed, using equal forces\n');
+        %         end
+        %     end
+        % 
+        %     params.mpc_plan = mock_plan;
+        % end
         
         f_r_mpc = params.mpc_plan.reaction_force;
         contact_cmd = params.mpc_plan.contact;
@@ -234,12 +235,16 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic;
 
         %% --- 4. QP SOLVER ---
-        n_vars = 18; 
-        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6);   
+        n_vars = 18;
+        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6);
         H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1);
-        
-        A_dyn = [H_ff, -JcT_f]; b_dyn = (JcT_f * f_r_mpc) - (H_f * q_ddot_cmd) - C_f;
-        
+
+        % Floating base dynamics constraint
+        % NOTE: state.bias_force (C) already includes gravity from MuJoCo's qfrc_bias
+        A_dyn = [H_ff, -JcT_f];
+        b_dyn = (JcT_f * f_r_mpc) - (H_f * q_ddot_cmd) - C_f;
+
+        % Swing foot zero force constraints (unchanged)
         A_swing_const = []; b_swing_const = [];
         for i = 1:4
             if contact_state(i) == 0
@@ -248,17 +253,35 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
                 A_swing_const = [A_swing_const; A_sub]; b_swing_const = [b_swing_const; 0; 0; 0];
             end
         end
-        
+
         A_eq = [A_dyn; A_swing_const]; b_eq = [b_dyn; b_swing_const];
-        
+
+        % FIX 2: Friction cone ONLY for stance legs
         mu = 0.6;  % Match MPC friction coefficient
         W_leg = [ -1, 0, mu; 1, 0, mu; 0,-1, mu; 0, 1, mu; 0, 0, 1 ];
-        W = blkdiag(W_leg, W_leg, W_leg, W_leg);
-        A_ineq = [zeros(20, 6), -W]; b_ineq = W * f_r_mpc;
-        
+
+        A_ineq = []; b_ineq = [];
+        for i = 1:4
+            if contact_state(i) == 1  % Only stance legs
+                idx = 3*i-2:3*i;  % Indices in f_r_mpc (1-3, 4-6, 7-9, 10-12)
+                f_idx_global = 6 + idx;  % Indices in QP variable [delta_f(6); delta_fr(12)]
+
+                % Create constraint matrix for this stance leg
+                W_i = zeros(5, 18);
+                W_i(:, f_idx_global) = -W_leg;  % Apply -W to delta_fr
+
+                % RHS: W_leg * f_r_mpc for this leg
+                b_i = W_leg * f_r_mpc(idx);
+
+                A_ineq = [A_ineq; W_i];
+                b_ineq = [b_ineq; b_i];
+            end
+        end
+
+        % Solve QP
         options = optimoptions('quadprog', 'Display', 'off', 'Algorithm', 'interior-point-convex');
         [x_sol, ~, flag] = quadprog(H_qp, f_qp, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
-        
+
         if flag == 1
             delta_f = x_sol(1:6); delta_fr = x_sol(7:18);
             f_r_final = f_r_mpc + delta_fr;
@@ -267,6 +290,9 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_control
         else
             tau_j = C_j - JcT_j * f_r_mpc;
             f_r_final = f_r_mpc;
+            if do_print
+                fprintf('[WBIC] ⚠ QP failed (flag=%d), using feedforward torques\n', flag);
+            end
         end
 
         % ===================== WBIC DEBUG LOGGING =====================

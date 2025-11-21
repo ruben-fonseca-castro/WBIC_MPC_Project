@@ -30,7 +30,7 @@ p_shoulders_body = [ LENGTH_X, -WIDTH_Y, 0; ...
 
 % FIX 2: CHANGE TIMING
 gait_trot = struct();
-gait_trot.T_cycle = 0.5;
+gait_trot.T_cycle = 1.0;
 gait_trot.stance_percent = 0.55; 
 gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0]; 
 

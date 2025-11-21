@@ -42,7 +42,7 @@ while true
     end
 
     % --- b. Run the WBIC Controller ---
-    [tau_cmd, contact_state, params, q_j_cmd, q_j_vel_cmd] = run_wbic_controller(state, params);
+    [tau_cmd, contact_state, params, q_j_cmd, q_j_vel_cmd, ~] = run_wbic_controller(state, params);
     
     % --- c. Publish the command ---
     publish_control_command(lc, params.control_msg, tau_cmd, contact_state, params, q_j_cmd, q_j_vel_cmd);
