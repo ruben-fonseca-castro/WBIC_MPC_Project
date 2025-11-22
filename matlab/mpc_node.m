@@ -15,7 +15,7 @@ disp('--- MPC Controller Node (Stable Wide Trot) ---');
 %% 1. CONFIGURATION & PARAMETERS
 %% ========================================================================
 
-TEST_TROT_IN_PLACE = false;  % Trot in place without joystick 
+TEST_TROT_IN_PLACE = true;  % Trot in place without joystick 
 
 MASS = 12.45; 
 GRAVITY = 9.81;
@@ -198,7 +198,7 @@ while true
 
         current_cmd_pos(2) = state.position(2);
         current_cmd_pos(3) = cmd_body_height;
-        current_cmd_yaw = state.rpy(3);
+        % current_cmd_yaw = state.rpy(3);  % REMOVED: This caused yaw drift by accepting actual as command
 
         % Calculate center of support --------- testing bs
         % feet_x = state.p_gc([1, 4, 7, 10]);
@@ -226,9 +226,9 @@ while true
     % --- D2. MPC Weight Scheduling Based on FSM State ---
     % State weights: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
     if current_fsm_state == FSM_STAND
-        % Standing: Lower orientation weights to reduce oscillations
-        % WBIC handles fine orientation control, MPC provides coarse stability
-        Q = diag([50.0, 50.0, 10.0, 20.0, 20.0, 50.0, 5.0, 5.0, 0.5, 3.0, 3.0, 5.0]);
+        % Standing: High orientation weights - MPC must drive error to zero
+        % (MPC acts as implicit integrator through receding horizon)
+        Q = diag([200.0, 200.0, 10.0, 20.0, 20.0, 50.0, 10.0, 10.0, 0.5, 3.0, 3.0, 5.0]);
     else
         % Locomotion: High orientation weights for aggressive correction
         Q = diag([150.0, 150.0, 10.0, 20.0, 20.0, 30.0, 1.0, 1.0, 0.5, 3.0, 3.0, 5.0]);
