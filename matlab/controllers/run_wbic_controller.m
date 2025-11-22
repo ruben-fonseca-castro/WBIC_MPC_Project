@@ -5,7 +5,24 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
     q_j_vel_cmd = zeros(12,1);
     contact_state = zeros(4,1);
     f_r_final = zeros(12,1);  % Initialize final forces output
-    
+
+    %% ==================== TASK GAINS (TUNE HERE) ====================
+    % Task 1: Body Orientation (Roll, Pitch, Yaw tracking)
+    kp_ori = 100;   % [rad/s^2 per rad] Orientation stiffness
+    kd_ori = 10;    % [rad/s^2 per rad/s] Orientation damping
+
+    % Task 2: Body Position (X, Y, Z tracking)
+    kp_pos = 100;   % [m/s^2 per m] Position stiffness
+    kd_pos = 10;    % [m/s^2 per m/s] Position damping
+
+    % Task 3: Swing Foot (per-foot position tracking)
+    % These are gain-scheduled based on gait mode (set below in code)
+    kp_swing_stand = 100;   % Standing mode - lower to avoid oscillations
+    kd_swing_stand = 10;
+    kp_swing_trot = 450;    % Trotting mode - Hyun et al. (2014) aggressive gains
+    kd_swing_trot = 50;
+    %% ================================================================
+
     % Debug Counter
     persistent wbic_cnt;
     if isempty(wbic_cnt), wbic_cnt = 0; end
@@ -29,76 +46,22 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         C_f = C(1:6); C_j = C(7:18);        
         JcT_f = J_c(:, 1:6)'; JcT_j = J_c(:, 7:18)';  
 
-        %% --- 2. Setup MPC Plan (MOCK / STANDALONE) ---
-        % if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
-        %     MASS = 12.45; GRAVITY = 9.81;
-        %     mock_plan = struct();
-        %     mock_plan.contact = [1;1;1;1];
-        % 
-        %     % Calculate center of support
-        %     feet_x = state.p_gc([1, 4, 7, 10]);
-        %     feet_y = state.p_gc([2, 5, 8, 11]);
-        %     center_x = mean(feet_x);
-        %     center_y = mean(feet_y);
-        % 
-        %     % Target: Centered over feet at specific height
-        %     height = 0.35;
-        %     mock_plan.body_pos_cmd = [center_x; center_y; height];
-        %     mock_plan.body_rpy_cmd = [0;0;0];
-        %     mock_plan.body_vel_cmd = zeros(3,1);
-        %     mock_plan.body_omega_cmd = zeros(3,1);
-        %     mock_plan.foot_pos_cmd = state.p_gc;
-        %     mock_plan.foot_vel_cmd = zeros(12,1);
-        % 
-        %     % --- Compute reaction forces using QP (like simplified MPC) ---
-        %     % This distributes forces to achieve equilibrium + orientation correction
-        %     p_com = state.position;
-        %     p_feet = reshape(state.p_gc, [3, 4]);
-        % 
-        %     % Build force distribution matrix
-        %     % [sum of forces = mg] and [sum of moments = desired moment]
-        %     A_fd = zeros(6, 12);
-        %     for i = 1:4
-        %         idx = (i-1)*3 + (1:3);
-        %         A_fd(1:3, idx) = eye(3);  % Force sum
-        %         r_i = p_feet(:, i) - p_com;
-        %         A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum
-        %     end
-        % 
-        %     % Desired wrench: gravity compensation + orientation correction
-        %     % Add moment to correct pitch/roll errors (negative feedback)
-        %     kp_ori = 50;  % Orientation correction gain
-        %     % Negative sign: if pitched forward (+), apply backward moment (-)
-        %     desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0];
-        %     b_fd = [0; 0; MASS * GRAVITY; desired_moment];
-        % 
-        %     % QP to find forces: min ||f||^2 s.t. A*f = b, friction cone
-        %     H_fd = eye(12);
-        %     f_fd = zeros(12, 1);
-        % 
-        %     % Friction cone constraints
-        %     mu = 0.6;
-        %     W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1];
-        %     A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg);
-        %     b_ineq_fd = zeros(20, 1);
-        % 
-        %     opts = optimoptions('quadprog', 'Display', 'off');
-        %     [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts);
-        % 
-        %     if exitflag == 1
-        %         mock_plan.reaction_force = f_sol;
-        %     else
-        %         % Fallback to equal forces
-        %         f_z = (MASS * GRAVITY) / 4;
-        %         mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1);
-        %         if do_print
-        %             fprintf('[WBIC Standalone] Force distribution QP failed, using equal forces\n');
-        %         end
-        %     end
-        % 
-        %     params.mpc_plan = mock_plan;
-        % end
-        
+        %% --- 2. Read MPC Plan ---
+        % NOTE: Mock MPC failsafe removed to avoid confounding WBIC tests.
+        % WBIC now requires a valid MPC plan to be published.
+        if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
+            % No MPC plan received - return zero torques
+            tau_j = zeros(12, 1);
+            contact_state = [0; 0; 0; 0];
+            q_j_cmd = state.qj_pos;
+            q_j_vel_cmd = zeros(12, 1);
+            f_r_final = zeros(12, 1);
+            if do_print
+                fprintf('[WBIC] No MPC plan received, outputting zero torques\n');
+            end
+            return;
+        end
+
         f_r_mpc = params.mpc_plan.reaction_force;
         contact_cmd = params.mpc_plan.contact;
 
@@ -144,24 +107,19 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % Task 1: Body Orientation (Highest Task)
         % Task 2: Body Position
         % Task 3: Swing Foot Position (Lowest)
-        
-        q_ddot_prev = zeros(18, 1); 
-        N_prev = eye(18);
-        
-        % Paper Table I gains
-        kp_base = 100; kd_base = 10;
 
-        % Gain scheduling: Use different gains for standing vs. locomotion
-        % Standing: Lower gains to avoid oscillations and noise amplification
-        % Locomotion: Higher gains (Hyun et al. 2014) for aggressive tracking
+        q_ddot_prev = zeros(18, 1);
+        N_prev = eye(18);
+
+        % Gain scheduling for swing foot: standing vs locomotion
         n_legs_in_contact = sum(contact_state);
         if n_legs_in_contact == 4
-            % All feet in stance = standing mode
-            kp_foot = 100; kd_foot = 10;  % Original stable gains
+            kp_swing = kp_swing_stand;
+            kd_swing = kd_swing_stand;
             gait_mode_str = 'STAND';
         else
-            % Dynamic gait (trot, etc)
-            kp_foot = 450; kd_foot = 50;  % Hyun et al. (2014) aggressive gains
+            kp_swing = kp_swing_trot;
+            kd_swing = kd_swing_trot;
             gait_mode_str = 'TROT';
         end 
 
@@ -180,10 +138,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
 
         % --- TASK 1: Body Orientation ---
-        J_1 = [zeros(3,3), eye(3), zeros(3,12)]; 
+        J_1 = [zeros(3,3), eye(3), zeros(3,12)];
         rot_err = params.mpc_plan.body_rpy_cmd - state.rpy;
         omega_err = params.mpc_plan.body_omega_cmd - state.omega;
-        x_ddot_1 = kp_base * rot_err + kd_base * omega_err;
+        x_ddot_1 = kp_ori * rot_err + kd_ori * omega_err;
         
         J_pre_1 = J_1 * N_prev; J_bar_1 = dynamic_pinv(J_pre_1, H);
         q_ddot_1 = q_ddot_prev + J_bar_1 * (x_ddot_1 - J_pre_1 * q_ddot_prev);
@@ -194,10 +152,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         ori_err_deg = rot_err * 180/pi;
 
         % --- TASK 2: Body Position ---
-        J_2 = [eye(3), zeros(3,3), zeros(3,12)]; 
+        J_2 = [eye(3), zeros(3,3), zeros(3,12)];
         pos_err = params.mpc_plan.body_pos_cmd - state.position;
         vel_err = params.mpc_plan.body_vel_cmd - state.velocity;
-        x_ddot_2 = kp_base * pos_err + kd_base * vel_err;
+        x_ddot_2 = kp_pos * pos_err + kd_pos * vel_err;
         
         J_pre_2 = J_2 * N_prev; J_bar_2 = dynamic_pinv(J_pre_2, H);
         q_ddot_2 = q_ddot_prev + J_bar_2 * (x_ddot_2 - J_pre_2 * q_ddot_prev);
@@ -215,7 +173,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
                 idx = 3*i-2 : 3*i;
                 p_err = p_gc_des(:, i) - p_gc_curr(:, i);
                 v_err = v_gc_des(:, i) - v_gc_act(idx);
-                acc_swing = kp_foot * p_err + kd_foot * v_err;
+                acc_swing = kp_swing * p_err + kd_swing * v_err;
                 x_ddot_3 = [x_ddot_3; acc_swing];
             end
         end
@@ -298,8 +256,9 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % ===================== WBIC DEBUG LOGGING =====================
         if do_print
             fprintf('\n================ WBIC DEBUG [%d] ================\n', wbic_cnt);
-            fprintf('Mode: %s | Gains: kp=%d kd=%d | QP flag=%d %s\n', ...
-                gait_mode_str, kp_foot, kd_foot, flag, wbic_qp_status(flag));
+            fprintf('Mode: %s | QP flag=%d %s\n', gait_mode_str, flag, wbic_qp_status(flag));
+            fprintf('Gains: Ori[kp=%d,kd=%d] Pos[kp=%d,kd=%d] Swing[kp=%d,kd=%d]\n', ...
+                kp_ori, kd_ori, kp_pos, kd_pos, kp_swing, kd_swing);
             fprintf('Contact (cmd/actual): [%d %d %d %d] / [%d %d %d %d]\n', ...
                 contact_cmd, contact_state);
 

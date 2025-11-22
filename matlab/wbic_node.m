@@ -4,6 +4,8 @@ format compact;
 
 addpath('utils/');
 addpath('controllers/');
+addpath('gait/');
+addpath('lcm/');
 
 disp('--- WBIC Controller ---');
 

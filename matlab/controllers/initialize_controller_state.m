@@ -6,10 +6,10 @@ function params = initialize_controller_state()
     params.dt = 1.0 / params.control_freq;
 
     % --- LCM Channels ---
-    params.STATE_CHANNEL = 'unitree_a1_state'; 
+    params.STATE_CHANNEL = 'unitree_a1_state';
     params.CONTROL_CHANNEL = 'unitree_a1_control';
     params.JOYSTICK_CHANNEL = 'XBOX_COMMAND';
-    params.PLAN_CHANNEL = 'MPC_PLAN'; 
+    params.PLAN_CHANNEL = 'unitree_a1_mpc_plan'; 
     
     params.control_msg = lcm_msgs.unitree_a1_control_t();
 

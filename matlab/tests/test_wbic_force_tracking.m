@@ -2,8 +2,9 @@ clc;
 clear;
 format compact;
 
-addpath('utils/');
-addpath('controllers/');
+addpath('../utils/');
+addpath('../controllers/');
+addpath('../lcm/');
 
 disp('========================================');
 disp('   WBIC Force Tracking Validation Test');
@@ -38,6 +39,11 @@ lc = lcm.lcm.LCM.getSingleton();
 agg_state = lcm.lcm.MessageAggregator();
 agg_state.setMaxMessages(1);
 lc.subscribe('unitree_a1_state', agg_state);  % Lowercase to match bridge
+
+% Subscribe to MPC plan (to read back what we publish)
+agg_plan = lcm.lcm.MessageAggregator();
+agg_plan.setMaxMessages(1);
+lc.subscribe('unitree_a1_mpc_plan', agg_plan);
 
 disp('Initializing controller state...');
 params = initialize_controller_state();
@@ -145,20 +151,26 @@ while sample_idx <= n_samples
         0; 0; f_RL_z
     ];
 
-    % --- Create Mock MPC Plan ---
-    params.mpc_plan = struct();
-    params.mpc_plan.reaction_force = f_r_cmd;
-    params.mpc_plan.contact = [1; 1; 1; 1];  % All feet in stance
+    % --- Create and Publish MPC Plan (LCM message) ---
+    plan_msg = lcm_msgs.mpc_plan_t();
+    plan_msg.timestamp = state.timestamp;
+    plan_msg.reaction_force = f_r_cmd;
+    plan_msg.contact = [1; 1; 1; 1];  % All feet in stance
+    plan_msg.body_pos_cmd = [state.position(1:2); 0.35];
+    plan_msg.body_rpy_cmd = [0; 0; state.rpy(3)];  % Keep current yaw
+    plan_msg.body_vel_cmd = zeros(3, 1);
+    plan_msg.body_omega_cmd = zeros(3, 1);
+    plan_msg.foot_pos_cmd = state.p_gc;
 
-    % Body commands: maintain current height, zero orientation
-    params.mpc_plan.body_pos_cmd = [state.position(1:2); 0.35];
-    params.mpc_plan.body_rpy_cmd = [0; 0; state.rpy(3)];  % Keep current yaw
-    params.mpc_plan.body_vel_cmd = zeros(3, 1);
-    params.mpc_plan.body_omega_cmd = zeros(3, 1);
+    % Publish the plan
+    lc.publish('unitree_a1_mpc_plan', plan_msg);
 
-    % Foot commands: keep current positions (standing)
-    params.mpc_plan.foot_pos_cmd = state.p_gc;
-    params.mpc_plan.foot_vel_cmd = zeros(12, 1);
+    % Read it back (will be a Java object, bypasses failsafe)
+    pause(0.0001);  % Brief pause to ensure message is received
+    plan_lcm = agg_plan.getNextMessage(0);
+    if ~isempty(plan_lcm)
+        params.mpc_plan = lcm_msgs.mpc_plan_t(plan_lcm.data);
+    end
 
     % --- Run WBIC ---
     [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_wbic_controller(state, params);

@@ -5,6 +5,9 @@ format compact;
 
 addpath('utils/');
 addpath('controllers/');
+addpath('mpc/');
+addpath('gait/');
+addpath('lcm/');
 
 disp('--- MPC Controller Node (Stable Wide Trot) ---');
 
@@ -12,7 +15,7 @@ disp('--- MPC Controller Node (Stable Wide Trot) ---');
 %% 1. CONFIGURATION & PARAMETERS
 %% ========================================================================
 
-TEST_TROT_IN_PLACE = true;  % Trot in place without joystick 
+TEST_TROT_IN_PLACE = false;  % Trot in place without joystick 
 
 MASS = 12.45; 
 GRAVITY = 9.81;
@@ -260,13 +263,13 @@ while true
                 % SWING: Use Bézier curve trajectory (Hyun et al. Section III-B)
                 p_shoulder = state.position + R_yaw * p_shoulders_body(:, i);
 
-                p_target = get_footstep_target_aggressive(state, ...
-                                                          v_des_world, ...
-                                                          body_omega_cmd, ...
-                                                          p_shoulder, ...
-                                                          current_gait.T_cycle * current_gait.stance_percent, ...
-                                                          k_raibert, ...
-                                                          cmd_body_height, GRAVITY);
+                p_target = get_footstep_target(state, ...
+                                              v_des_world, ...
+                                              body_omega_cmd, ...
+                                              p_shoulder, ...
+                                              current_gait.T_cycle * current_gait.stance_percent, ...
+                                              k_raibert, ...
+                                              cmd_body_height, GRAVITY);
 
                 p_target(3) = touchdown_positions(3, i);  % Use previous touchdown height
                 T_swing = current_gait.T_cycle * (1 - current_gait.stance_percent);
@@ -519,30 +522,3 @@ function str = qp_status_str(flag)
     end
 end
 
-% --- LOCAL FUNCTIONS ---
-function [p, v] = get_swing_traj_cosine(phase, p_start, p_end, h, T_swing)
-    p_xy = (1-phase)*p_start(1:2) + phase*p_end(1:2);
-    v_xy = (p_end(1:2) - p_start(1:2)) / T_swing;
-    ground_z = (1-phase)*p_start(3) + phase*p_end(3);
-    p_z = ground_z + (h/2) * (1 - cos(2*pi*phase));
-    v_z = (h * pi / T_swing) * sin(2*pi*phase);
-    p = [p_xy; p_z]; v = [v_xy; v_z];
-end
-
-function [p_target] = get_footstep_target_aggressive(state, v_des, omega_des, p_shoulder, T_stance, k_raibert, current_height, gravity)
-    % 1. Symmetry (Feedforward)
-    p_symmetry = (T_stance / 2) * v_des; 
-    
-    % 2. Feedback (Raibert)
-    v_curr = state.velocity(1:3);
-    % Boost Lateral Feedback Gain (Y-axis) to stop swaying
-    gain_vector = [k_raibert; k_raibert * 2.0; 0]; 
-    p_feedback = gain_vector .* (v_curr - v_des);
-    
-    % 3. Centrifugal
-    coeff = 0.5 * sqrt(current_height / gravity);
-    p_centrifugal = coeff * cross(v_curr, omega_des);
-    
-    p_target = p_shoulder + p_symmetry + p_feedback + p_centrifugal;
-    p_target(3) = 0.0;
-end
