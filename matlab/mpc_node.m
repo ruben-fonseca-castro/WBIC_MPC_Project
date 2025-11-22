@@ -47,7 +47,7 @@ cmd_body_height = 0.35;  % Reduced to match typical standing height
 % MPC Solver
 mpc_freq = 40; 
 dt = 1.0 / mpc_freq; 
-N_horizon = 10;
+N_horizon = 20;
 MU = 0.6; 
 
 % State weights will be set in main loop based on FSM state
@@ -71,7 +71,7 @@ current_fsm_state = FSM_STAND;
 %% ========================================================================
 
 disp('Setting up paths & LCM...');
-person_select = 'David'; 
+person_select = 'Ruben_Linux'; 
 setup_paths(person_select);
 params = initialize_controller_state();
 
@@ -187,15 +187,30 @@ while true
         yaw = state.rpy(3);
         R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
         v_des_world = R_z * v_des_body;
+        % v_des_world = [0;0;0];
         body_omega_cmd = [0; 0; des_yaw_rate];
     end
 
     % --- D. State Execution ---
     if current_fsm_state == FSM_STAND
-        current_cmd_pos(1) = state.position(1);
+        % current_cmd_pos(1) = state.position(1); %modified this to test
+        % something
+
         current_cmd_pos(2) = state.position(2);
         current_cmd_pos(3) = cmd_body_height;
         current_cmd_yaw = state.rpy(3);
+
+        % Calculate center of support --------- testing bs
+        % feet_x = state.p_gc([1, 4, 7, 10]);
+        % feet_y = state.p_gc([2, 5, 8, 11]);
+        % center_x = mean(feet_x);
+        % center_y = mean(feet_y);
+        % 
+        % current_cmd_pos(1) = center_x;
+        % current_cmd_pos(2) = center_y;
+        % current_cmd_pos(3) = cmd_body_height;
+        % current_cmd_yaw = 0;
+
         contact_cmd = [1; 1; 1; 1];
     else
         gait_timer = mod(gait_timer + dt, current_gait.T_cycle);
@@ -480,6 +495,8 @@ while true
         fprintf('  Pos err: X:%+.0fmm Y:%+.0fmm Z:%+.0fmm\n', ...
             pos_err(1)*1000, pos_err(2)*1000, pos_err(3)*1000);
         fprintf('  Ori err: R:%+.1f° P:%+.1f° Y:%+.1f°\n', rpy_err_deg);
+        fprintf('  Body pos cmd: X:%+.1f Y:%+.1f Z:%+.1f\n', body_pos_cmd);
+        fprintf('  rpy cmd: R:%+.1f° P:%+.1f° Y:%+.1f°\n', body_rpy_cmd);
         fprintf('  Vel:     [%.3f, %.3f, %.3f] m/s\n', state.velocity);
 
         % Warnings
