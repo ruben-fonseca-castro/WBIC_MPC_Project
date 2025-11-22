@@ -184,7 +184,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         J_1 = [zeros(3,3), eye(3), zeros(3,12)]; 
         rot_err = params.mpc_plan.body_rpy_cmd - state.rpy;
         omega_err = params.mpc_plan.body_omega_cmd - state.omega;
-        x_ddot_1 = 20 * kp_base * rot_err + 20 * kd_base * omega_err;
+        x_ddot_1 = 0 * kp_base * rot_err + 0 * kd_base * omega_err;
         % fprintf("nuking body orientation");
         
         J_pre_1 = J_1 * N_prev; J_bar_1 = dynamic_pinv(J_pre_1, H);

@@ -9,7 +9,7 @@ disp('--- WBIC Controller ---');
 
 %% 1. Setup
 disp('Setting up paths...');
-person_select = 'David'; % ('David' or 'Ruben' or 'Pranav')
+person_select = 'Ruben_Linux'; % ('David' or 'Ruben' or 'Pranav')
 setup_paths(person_select);
 
 disp('Initializing controller...');

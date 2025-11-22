@@ -13,6 +13,12 @@ function setup_paths(person_select)
         lcm_lib_path = 'C:\Users\Ruben\miniconda3\envs\arcpy\lib\site-packages\share\java\lcm.jar';
         project_dir = 'C:\Users\Ruben\Documents_COPY\LeggedRobots\Final_Project\arc-bridge';
     
+    elseif strcmp(person_select,'Ruben_Linux')
+        % --- Ubuntu / Linux Paths ---
+        disp('Linux/Unix system detected.');
+        lcm_lib_path = '/home/rubenafc/miniconda3/envs/arcpy/lib/python3.9/site-packages/share/java/lcm.jar';
+        project_dir = '/home/rubenafc/Documents/LRC_Final_Project/arc-bridge';
+
     elseif strcmp(person_select,'Pranav')
         % --- Windows Paths ---
         disp('Windows system detected.');
