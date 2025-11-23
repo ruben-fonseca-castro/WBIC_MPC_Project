@@ -96,7 +96,9 @@ def main():
 
     # Initialize bridge
     try:
-        bridge_name = "".join([s.capitalize() for s in robot_type.split("_")]) + "Bridge"
+        # Check if this robot type uses a different bridge class
+        bridge_robot_type = Config.robot_bridge_map.get(robot_type, robot_type)
+        bridge_name = "".join([s.capitalize() for s in bridge_robot_type.split("_")]) + "Bridge"
         bridge = eval(bridge_name)(mj_model, mj_data, robot_config)
     except NameError as e:
         bridge = Lcm2MujocoBridge(mj_model, mj_data, robot_config)

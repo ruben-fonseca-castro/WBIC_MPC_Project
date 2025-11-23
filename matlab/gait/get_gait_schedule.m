@@ -31,6 +31,16 @@ function [contact, swing_phase, stance_phase, state_changed, p_touchdown] = get_
     %   p_touchdown  - [3x1] Touch-down position
 
     %% --- Step 1: Periodic Phase-Based Schedule ---
+    % Special case: phase_offset > 1 means "always stance" (for testing single legs)
+    if phase_offset > 1.0
+        contact = 1;
+        swing_phase = 0.0;
+        stance_phase = 0.0;
+        state_changed = false;
+        p_touchdown = zeros(3, 1);
+        return;
+    end
+
     phase = mod((timer / T_cycle) + phase_offset, 1.0);
 
     if phase < stance_percent

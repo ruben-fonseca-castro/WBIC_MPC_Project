@@ -22,6 +22,10 @@ class Config:
         "unitree_a1":       "unitree_a1/scene.xml",
         # "arm2link":         "Arm2Link/arm2link_sensing.xml",
     }
+
+    # Map robot types to their bridge class names (for robots sharing a bridge)
+    robot_bridge_map = {
+    }
     valid_robot_types = list(robot_path_dict.keys())
 
     def __init__(self, robot_type):
@@ -30,7 +34,9 @@ class Config:
         if self.robot_type not in self.valid_robot_types:
             raise ValueError(f"Invalid robot type: {self.robot_type}. Valid robot types are: {self.valid_robot_types}")
 
-        self.robot_state_topic = self.robot_type + "_state"
-        self.robot_cmd_topic = self.robot_type + "_control"
+        # Use base robot type for topics (e.g., unitree_a1_fixed uses unitree_a1 topics)
+        base_robot_type = self.robot_bridge_map.get(self.robot_type, self.robot_type)
+        self.robot_state_topic = base_robot_type + "_state"
+        self.robot_cmd_topic = base_robot_type + "_control"
 
         self.robot_xml_path = str(self.asset_root / self.robot_path_dict[self.robot_type])

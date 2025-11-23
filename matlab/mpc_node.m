@@ -9,13 +9,11 @@ addpath('mpc/');
 addpath('gait/');
 addpath('lcm/');
 
-disp('--- MPC Controller Node (Stable Wide Trot) ---');
+disp('--- MPC Controller Node (Walking Gait) ---');
 
 %% ========================================================================
 %% 1. CONFIGURATION & PARAMETERS
-%% ========================================================================
-
-TEST_TROT_IN_PLACE = true;  % Trot in place without joystick 
+%% ======================================================================== 
 
 MASS = 12.45; 
 GRAVITY = 9.81;
@@ -31,32 +29,62 @@ p_shoulders_body = [ LENGTH_X, -WIDTH_Y, 0; ...
                     -LENGTH_X, -WIDTH_Y, 0; ... 
                     -LENGTH_X,  WIDTH_Y, 0]';   
 
-% FIX 2: CHANGE TIMING
+% TROT GAIT: 2 diagonal legs in contact, fast but less stable
 gait_trot = struct();
 gait_trot.T_cycle = 1.0;
-gait_trot.stance_percent = 0.55; 
-gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0]; 
+gait_trot.stance_percent = 0.55;
+gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR together
 
-current_gait = gait_trot;
+% WALK GAIT: 3 legs in contact at all times, slower but more stable
+% Lateral sequence: FR -> RR -> FL -> RL (each 25% offset)
+% With 80% stance, more overlap between legs for stability
+gait_walk = struct();
+gait_walk.T_cycle = 2.0;           % Slow cycle for stability (was 1.5)
+gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
+gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
+
+% TEST GAIT: Only FR leg swings, other 3 stay planted (tripod test)
+% This isolates swing leg tracking issues
+gait_test_FR = struct();
+gait_test_FR.T_cycle = 2.0;        % Slow cycle for testing
+gait_test_FR.stance_percent = 0.7; % 70% stance, 30% swing
+gait_test_FR.phase_offsets = [0.0, 999, 999, 999];  % Only FR swings (999 = always stance)
+
+current_gait = gait_walk;  % Full walk gait - all 4 legs take turns (stationary test)
 
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
-swing_height = 0.10;
-cmd_body_height = 0.35;  % Reduced to match typical standing height 
+swing_height = 0.04;  % 4cm - increased clearance for forward walking
+cmd_body_height = 0.35;  % Reduced to match typical standing height
 
 % MPC Solver
-mpc_freq = 40; 
-dt = 1.0 / mpc_freq; 
-N_horizon = 20;
-MU = 0.6; 
+mpc_freq = 40;
+dt = 1.0 / mpc_freq;
+N_horizon = 20;  % 20 * 0.025s = 0.5s lookahead
+MU = 0.6;
 
-% State weights will be set in main loop based on FSM state
+%% ==================== MPC WEIGHTS (TUNE HERE) ====================
+% State vector: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
+
+% Standing: Moderate orientation weights, robot is stable on 4 legs
+Q_stand = diag([200, 200, 10, ...   % roll, pitch, yaw
+                20, 20, 50, ...     % px, py, pz
+                10, 10, 0.5, ...    % wx, wy, wz (angular vel)
+                3, 3, 5]);          % vx, vy, vz (linear vel)
+
+% Locomotion: HIGH orientation weights - 3-leg support is less stable
+% Must aggressively correct tilt when one leg is swinging
+Q_loco = diag([350, 350, 10, ...    % roll, pitch, yaw (balanced increase)
+               30, 40, 40, ...      % px, py, pz (increased py for drift)
+               15, 15, 0.5, ...     % wx, wy, wz (penalize fast rotation)
+               3, 3, 5]);           % vx, vy, vz
 
 % Force weights - penalize total force magnitude, NOT distribution
 % This allows asymmetric forces for orientation control while keeping total near mg
 R_leg_xy = 1e-4;  % Small penalty on lateral forces
 R_leg_z = 1e-5;   % Very small penalty on vertical to allow redistribution
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
+%% =================================================================
 
 % Nominal force per leg (gravity compensation)
 f_nominal = zeros(12, 1);
@@ -162,34 +190,34 @@ while true
     end
 
     % --- C. FSM Logic ---
-    if TEST_TROT_IN_PLACE
-        current_fsm_state = FSM_LOCOMOTION;
-        v_des_world = zeros(3, 1);
-        body_omega_cmd = zeros(3, 1);
-        des_yaw_rate = 0;
-    else
-        joy_vec = [joy.left_stick_x, joy.left_stick_y, joy.right_stick_x];
-        move_req = (norm(joy_vec) > 0.1);
-        
-        switch current_fsm_state
-            case FSM_STAND
-                if move_req, current_fsm_state = FSM_LOCOMOTION; end
-            case FSM_LOCOMOTION
-                time_left = current_gait.T_cycle - gait_timer;
-                if ~move_req && (time_left < dt*2)
-                    current_fsm_state = FSM_STAND;
-                    gait_timer = 0.0;
-                end
-        end
-        
-        v_des_body = [-joy.left_stick_y * 0.6; -joy.left_stick_x * 0.3; 0];
-        des_yaw_rate = -joy.right_stick_x * 1.0;
-        yaw = state.rpy(3);
-        R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
-        v_des_world = R_z * v_des_body;
-        % v_des_world = [0;0;0];
-        body_omega_cmd = [0; 0; des_yaw_rate];
+    % Simple: joystick forward = walk, release = stand
+    WALK_SPEED = 0.15;  % m/s - slow forward walk
+    move_req = (joy.left_stick_y < -0.1);  % Joystick pushed forward
+
+    switch current_fsm_state
+        case FSM_STAND
+            if move_req, current_fsm_state = FSM_LOCOMOTION; end
+        case FSM_LOCOMOTION
+            time_left = current_gait.T_cycle - gait_timer;
+            if ~move_req && (time_left < dt*2)
+                current_fsm_state = FSM_STAND;
+                gait_timer = 0.0;
+            end
     end
+
+    % Fixed forward speed when walking, no lateral movement
+    if move_req
+        v_des_body = [WALK_SPEED; 0; 0];
+    else
+        v_des_body = [0; 0; 0];
+    end
+
+    yaw = state.rpy(3);
+    R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
+    v_des_world = R_z * v_des_body;
+    body_omega_cmd = [0; 0; 0];  % No yaw control for now
+    des_yaw_rate = 0;  % No yaw control
+    des_pitch = 0;  % No pitch control for now
 
     % --- D. State Execution ---
     if current_fsm_state == FSM_STAND
@@ -221,17 +249,13 @@ while true
     
     body_pos_cmd = current_cmd_pos;
     body_vel_cmd = v_des_world;
-    body_rpy_cmd = [0; 0; current_cmd_yaw];
+    body_rpy_cmd = [0; des_pitch; current_cmd_yaw];  % [roll=0, pitch=joystick, yaw=integrated]
 
     % --- D2. MPC Weight Scheduling Based on FSM State ---
-    % State weights: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
     if current_fsm_state == FSM_STAND
-        % Standing: High orientation weights - MPC must drive error to zero
-        % (MPC acts as implicit integrator through receding horizon)
-        Q = diag([200.0, 200.0, 10.0, 20.0, 20.0, 50.0, 10.0, 10.0, 0.5, 3.0, 3.0, 5.0]);
+        Q = Q_stand;
     else
-        % Locomotion: High orientation weights for aggressive correction
-        Q = diag([150.0, 150.0, 10.0, 20.0, 20.0, 30.0, 1.0, 1.0, 0.5, 3.0, 3.0, 5.0]);
+        Q = Q_loco;
     end
 
     % --- E. Gait Scheduler & Trajectory Generation (Paper Methods) ---

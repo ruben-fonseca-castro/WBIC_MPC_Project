@@ -9,22 +9,20 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
     %% ==================== TASK GAINS (TUNE HERE) ====================
     % Task 1: Body Orientation (Roll, Pitch, Yaw tracking)
     % For critical damping: kd = 2*sqrt(kp), i.e. damping ratio ζ = 1.0
-    % Increased from 1000 due to steady-state error with low torque usage
     kp_ori = 2000;   % [rad/s^2 per rad] Orientation stiffness
-    kd_ori = 100;    % [rad/s^2 per rad/s] Orientation damping (ζ ≈ 1.1, slightly overdamped)
+    kd_ori = 100;    % [rad/s^2 per rad/s] Orientation damping (ζ ≈ 1.1)
 
     % Task 2: Body Position (X, Y, Z tracking)
     % For critical damping: kd = 2*sqrt(kp)
-    % Increased from 100 due to slow height tracking (~40s to reach target)
     kp_pos = 200;   % [m/s^2 per m] Position stiffness
-    kd_pos = 30;    % [m/s^2 per m/s] Position damping (ζ ≈ 1.06, slightly overdamped)
+    kd_pos = 30;    % [m/s^2 per m/s] Position damping (ζ ≈ 1.06)
 
     % Task 3: Swing Foot (per-foot position tracking)
     % These are gain-scheduled based on gait mode (set below in code)
     kp_swing_stand = 100;   % Standing mode - lower to avoid oscillations
     kd_swing_stand = 10;
-    kp_swing_trot = 450;    % Trotting mode - Hyun et al. (2014) aggressive gains
-    kd_swing_trot = 50;
+    kp_swing_trot = 650;    % Increased for faster swing tracking (was 450)
+    kd_swing_trot = 55;     % Damping (ζ ≈ 1.08 for kp=650)
     %% ================================================================
 
     % Debug Counter
