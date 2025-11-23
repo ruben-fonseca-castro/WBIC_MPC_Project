@@ -21,8 +21,8 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
     % These are gain-scheduled based on gait mode (set below in code)
     kp_swing_stand = 100;   % Standing mode - lower to avoid oscillations
     kd_swing_stand = 10;
-    kp_swing_trot = 650;    % Increased for faster swing tracking (was 450)
-    kd_swing_trot = 55;     % Damping (ζ ≈ 1.08 for kp=650)
+    kp_swing_trot = 800;    % Increased for faster swing tracking (was 650)
+    kd_swing_trot = 60;     % Damping (ζ ≈ 1.06 for kp=800)
     %% ================================================================
 
     % Debug Counter
@@ -131,25 +131,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         p_gc_curr = reshape(state.p_gc, [3, 4]);
 
-        %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
-        % Use force feedback to detect early touch-down during swing
-        force_threshold = 20.0;  % N - threshold for touch-down detection
-        contact_state = zeros(4, 1);
-
-        for leg = 1:4
-            % Extract foot force magnitude from reaction forces
-            idx = 3*leg-2:3*leg;
-            foot_force = norm(f_r_mpc(idx));
-
-            % Event-based override: if MPC commands swing BUT force detected -> switch to stance
-            if contact_cmd(leg) == 0 && foot_force > force_threshold
-                % Early touch-down detected!
-                contact_state(leg) = 1;
-            else
-                % Use MPC contact command
-                contact_state(leg) = contact_cmd(leg);
-            end
-        end
+        %% --- 2b. Contact State (Phase-Based, Kim et al. 2019) ---
+        % Use pure phase-based scheduling from MPC - no event-based override
+        % Event-based detection disabled: was using commanded force instead of sensor feedback
+        contact_state = contact_cmd;
 
         % Update previous contact state
         prev_contact_state = contact_state;

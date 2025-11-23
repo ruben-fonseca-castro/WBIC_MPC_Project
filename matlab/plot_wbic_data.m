@@ -59,6 +59,42 @@ for i = 1:3
     if i == 3, xlabel('Time (s)'); end
 end
 
+%% Figure 2b: Angular Velocity Tracking
+if isfield(data, 'omega') && isfield(data, 'omega_cmd')
+    figure('Name', 'Angular Velocity', 'Position', [660, 500, 600, 400]);
+
+    omega_labels = {'\omega_x', '\omega_y', '\omega_z'};
+    for i = 1:3
+        subplot(3, 1, i);
+        plot(data.t, rad2deg(data.omega(i,:)), 'b', 'LineWidth', 1.2); hold on;
+        plot(data.t, rad2deg(data.omega_cmd(i,:)), 'r--', 'LineWidth', 1);
+        ylabel([omega_labels{i} ' (deg/s)']);
+        rmse_val = rms(rad2deg(data.omega(i,:) - data.omega_cmd(i,:)));
+        title(sprintf('%s  |  RMSE: %.2f deg/s', omega_labels{i}, rmse_val));
+        legend('Actual', 'Cmd', 'Location', 'best');
+        grid on;
+        if i == 3, xlabel('Time (s)'); end
+    end
+end
+
+%% Figure 2c: Linear Velocity Tracking
+if isfield(data, 'vel') && isfield(data, 'vel_cmd')
+    figure('Name', 'Linear Velocity', 'Position', [660, 50, 600, 400]);
+
+    vel_labels = {'v_x', 'v_y', 'v_z'};
+    for i = 1:3
+        subplot(3, 1, i);
+        plot(data.t, data.vel(i,:), 'b', 'LineWidth', 1.2); hold on;
+        plot(data.t, data.vel_cmd(i,:), 'r--', 'LineWidth', 1);
+        ylabel([vel_labels{i} ' (m/s)']);
+        rmse_val = rms(data.vel(i,:) - data.vel_cmd(i,:));
+        title(sprintf('%s  |  RMSE: %.3f m/s', vel_labels{i}, rmse_val));
+        legend('Actual', 'Cmd', 'Location', 'best');
+        grid on;
+        if i == 3, xlabel('Time (s)'); end
+    end
+end
+
 %% Figure 3: Foot Position Tracking
 if isfield(data, 'foot_pos') && isfield(data, 'foot_pos_cmd')
     figure('Name', 'Foot Position', 'Position', [700, 500, 900, 600]);
@@ -153,7 +189,7 @@ end
 fprintf('=============================\n');
 
 %% Save figures as PNG
-fig_names = {'Body Orientation', 'Body Position', 'Foot Position', 'Foot Force'};
+fig_names = {'Body Orientation', 'Body Position', 'Angular Velocity', 'Linear Velocity', 'Foot Position', 'Foot Force'};
 for i = 1:length(fig_names)
     fig = findobj('Type', 'figure', 'Name', fig_names{i});
     if ~isempty(fig)

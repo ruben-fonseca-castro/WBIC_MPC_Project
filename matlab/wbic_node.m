@@ -23,6 +23,10 @@ data.rpy = [];
 data.rpy_cmd = [];
 data.pos = [];
 data.pos_cmd = [];
+data.omega = [];        % Angular velocity (wx, wy, wz)
+data.omega_cmd = [];
+data.vel = [];          % Linear velocity (vx, vy, vz)
+data.vel_cmd = [];
 data.foot_pos = [];
 data.foot_pos_cmd = [];
 data.foot_force_cmd = [];  % MPC commanded forces (12 components)
@@ -54,6 +58,8 @@ while true
     data.t(end+1) = toc(log_start);
     data.rpy(:, end+1) = state.rpy;
     data.pos(:, end+1) = state.position;
+    data.omega(:, end+1) = state.omega;
+    data.vel(:, end+1) = state.velocity;
     data.foot_pos(:, end+1) = state.p_gc;
 
     data.foot_force_actual(:, end+1) = f_r_actual;  % WBIC computed forces
@@ -61,11 +67,15 @@ while true
     if isjava(params.mpc_plan) && ~isempty(params.mpc_plan)
         data.rpy_cmd(:, end+1) = params.mpc_plan.body_rpy_cmd;
         data.pos_cmd(:, end+1) = params.mpc_plan.body_pos_cmd;
+        data.omega_cmd(:, end+1) = params.mpc_plan.body_omega_cmd;
+        data.vel_cmd(:, end+1) = params.mpc_plan.body_vel_cmd;
         data.foot_pos_cmd(:, end+1) = params.mpc_plan.foot_pos_cmd;
         data.foot_force_cmd(:, end+1) = params.mpc_plan.reaction_force;
     else
         data.rpy_cmd(:, end+1) = [0; 0; state.rpy(3)];
         data.pos_cmd(:, end+1) = [state.position(1:2); 0.35];
+        data.omega_cmd(:, end+1) = [0; 0; 0];
+        data.vel_cmd(:, end+1) = [0; 0; 0];
         data.foot_pos_cmd(:, end+1) = state.p_gc;
         data.foot_force_cmd(:, end+1) = [0; 0; 12.45*9.81/4; 0; 0; 12.45*9.81/4; 0; 0; 12.45*9.81/4; 0; 0; 12.45*9.81/4];
     end

@@ -39,16 +39,9 @@ gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR togethe
 % Lateral sequence: FR -> RR -> FL -> RL (each 25% offset)
 % With 80% stance, more overlap between legs for stability
 gait_walk = struct();
-gait_walk.T_cycle = 2.0;           % Slow cycle for stability (was 1.5)
+gait_walk.T_cycle = 2.0;           % Fixed cycle for stability
 gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
 gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
-
-% TEST GAIT: Only FR leg swings, other 3 stay planted (tripod test)
-% This isolates swing leg tracking issues
-gait_test_FR = struct();
-gait_test_FR.T_cycle = 2.0;        % Slow cycle for testing
-gait_test_FR.stance_percent = 0.7; % 70% stance, 30% swing
-gait_test_FR.phase_offsets = [0.0, 999, 999, 999];  % Only FR swings (999 = always stance)
 
 current_gait = gait_walk;  % Full walk gait - all 4 legs take turns (stationary test)
 
@@ -74,15 +67,14 @@ Q_stand = diag([200, 200, 10, ...   % roll, pitch, yaw
 
 % Locomotion: HIGH orientation weights - 3-leg support is less stable
 % Must aggressively correct tilt when one leg is swinging
-Q_loco = diag([350, 350, 10, ...    % roll, pitch, yaw (balanced increase)
-               30, 40, 40, ...      % px, py, pz (increased py for drift)
-               15, 15, 0.5, ...     % wx, wy, wz (penalize fast rotation)
+Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
+               30, 40, 40, ...      % px, py, pz
+               15, 15, 0.5, ...     % wx, wy, wz
                3, 3, 5]);           % vx, vy, vz
 
-% Force weights - penalize total force magnitude, NOT distribution
-% This allows asymmetric forces for orientation control while keeping total near mg
+% Force weights - allow asymmetric forces for orientation control
 R_leg_xy = 1e-4;  % Small penalty on lateral forces
-R_leg_z = 1e-5;   % Very small penalty on vertical to allow redistribution
+R_leg_z = 1e-5;   % Very small to allow force redistribution for balance
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
 %% =================================================================
 
@@ -191,7 +183,7 @@ while true
 
     % --- C. FSM Logic ---
     % Simple: joystick forward = walk, release = stand
-    WALK_SPEED = 0.15;  % m/s - slow forward walk
+    WALK_SPEED = 0.15;  % m/s - forward walk
     move_req = (joy.left_stick_y < -0.1);  % Joystick pushed forward
 
     switch current_fsm_state
