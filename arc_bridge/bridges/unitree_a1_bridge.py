@@ -40,13 +40,14 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
 
         # --- State Estimator ---
         self.height_init = 0.43 # From trunk body pos in a1.xml
-        
+
         # Process noise (px, py, pz, vx, vy, vz)
         KF_Q = np.diag([0.002, 0.002, 0.002, 0.02, 0.02, 0.02])
-        # Measurement noise (pz, vx, vy, vz)
-        KF_R = np.diag([0.001, 1, 1, 50])
-        
-        self.KF = FloatingBaseLinearStateEstimator(self.config.dt_sim, KF_Q, KF_R, self.height_init)
+        # Measurement noise (px, py, pz, vx, vy, vz) - full state observation
+        # Position from foot contacts, velocity from foot kinematics
+        KF_R = np.diag([0.01, 0.01, 0.001, 1, 1, 50])
+
+        self.KF = FloatingBaseLinearStateEstimator(self.config.dt_sim, KF_Q, KF_R, self.height_init, num_legs=4)
         self.low_state.position = [0, 0, self.height_init]
         self.low_state.quaternion = [1, 0, 0, 0] # wxyz
         self.low_cmd.contact = [1, 1, 1, 1] # Start assuming all 4 feet on ground
@@ -76,42 +77,65 @@ class UnitreeA1Bridge(Lcm2MujocoBridge):
     def update_state_estimation(self):
         """
         Estimates floating base position and velocity using a Kalman Filter.
-        This function is copied from tron1 bridge and needs 
-        'calculate_foot_position_and_velocity' to be implemented for A1.
+        Uses foot contact positions to correct px/py drift.
         """
-        # Retrive states from IMU readings
-        omega_body = self.low_state.omega
-        acc_body = self.low_state.acceleration
+        # Retrieve states from IMU readings
+        omega_body = np.array(self.low_state.omega)
+        acc_body = np.array(self.low_state.acceleration)
         R_body_to_world = quat_to_rot(Quaternion(*self.low_state.quaternion))
+        contact_state = np.array(self.low_cmd.contact)
 
         # Predict based on accelerations
         acc_world = R_body_to_world @ acc_body
         se_state = self.KF.predict(acc_world + self.gravity)
 
         # Calculate foot positions and velocities in the BODY frame
-        pf, vf = self.calculate_foot_position_and_velocity() # You must implement this!
+        pf_body, vf_body = self.calculate_foot_position_and_velocity()
 
-        # Correct based on foot contact
+        # Get foot positions in world frame for touchdown tracking
+        torso_id = mujoco.mj_name2id(self.mj_model, mujoco._enums.mjtObj.mjOBJ_BODY, self.torso_name)
+        p_body_world_mujoco = self.mj_data.xpos[torso_id]
+        pf_world = np.array([p_body_world_mujoco + R_body_to_world @ pf_body[i] for i in range(self.num_legs)])
+
+        # Update foot touchdown positions (detect touchdown events)
+        self.KF.update_foot_contact(contact_state, pf_world)
+
+        # Compute body position from stance feet (for px, py correction)
+        pos_measured = self.KF.compute_body_position_from_contacts(contact_state, pf_body, R_body_to_world)
+
+        # Compute velocity from stance feet
+        vel_measured_list = []
         for idx in range(self.num_legs):
-            if self.low_cmd.contact[idx] > 0:
-                foot_vel_body = vf[idx]
-                vel_measured = -R_body_to_world @ (foot_vel_body + np.cross(omega_body, pf[idx]))
-                height_measured = -(R_body_to_world @ pf[idx])[2] + self.foot_radius
-                se_state = self.KF.correct(np.append(height_measured, vel_measured))
+            if contact_state[idx] > 0:
+                foot_vel_body = vf_body[idx]
+                vel_measured = -R_body_to_world @ (foot_vel_body + np.cross(omega_body, pf_body[idx]))
+                vel_measured_list.append(vel_measured)
+
+        if len(vel_measured_list) > 0:
+            vel_measured_avg = np.mean(vel_measured_list, axis=0)
+        else:
+            vel_measured_avg = np.zeros(3)
+
+        # Correct with full state observation [px, py, pz, vx, vy, vz]
+        if pos_measured is not None:
+            # Use foot-derived position for px, py; height for pz
+            height_measured = -(R_body_to_world @ np.mean(pf_body[contact_state > 0], axis=0))[2] + self.foot_radius
+            pos_measured[2] = height_measured  # Override pz with height measurement
+            full_measurement = np.concatenate([pos_measured, vel_measured_avg])
+            se_state = self.KF.correct(full_measurement)
 
         se_state_smoothed = self.se_filter.calculate_average(se_state)
         self.vis_pos_est = se_state_smoothed[:3]
         self.vis_vel_est = se_state_smoothed[3:]
         self.vis_R_body = R_body_to_world
 
-        # print(f"Est Pos-Z: {se_state_smoothed[2]:.3f}  |  Est Vel-Z: {se_state_smoothed[5]:.3f}")
-
-        # Write estimated states into low_state
-        self.low_state.position[2] = se_state_smoothed[2]
-        self.low_state.velocity[:] = se_state_smoothed[3:]
+        # Write estimated states into low_state (all 3 position components)
+        self.low_state.position[:] = se_state_smoothed[:3]  # px, py, pz
+        self.low_state.velocity[:] = se_state_smoothed[3:]  # vx, vy, vz
 
         if self.low_cmd.reset_se:
             self.KF.reset(np.array([0, 0, self.height_init, 0, 0, 0]))
+            self.KF.prev_contact = np.zeros(self.num_legs)  # Reset contact tracking
 
     def calculate_foot_position_and_velocity(self):
         """

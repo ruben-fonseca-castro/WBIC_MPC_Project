@@ -50,6 +50,14 @@ k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
 swing_height = 0.04;  % 4cm - increased clearance for forward walking
 cmd_body_height = 0.35;  % Reduced to match typical standing height
 
+%% ==================== VELOCITY COMMAND (TUNE HERE) ====================
+% Set USE_JOYSTICK = false to command velocity directly without joystick
+USE_JOYSTICK = false;
+CMD_VEL_X = 0.15;   % [m/s] Forward velocity (+ = forward)
+CMD_VEL_Y = 0.0;    % [m/s] Lateral velocity (+ = left)
+CMD_YAW_RATE = 0.0; % [rad/s] Yaw rate (+ = CCW)
+%% =======================================================================
+
 % MPC Solver
 mpc_freq = 40;
 dt = 1.0 / mpc_freq;
@@ -182,9 +190,20 @@ while true
     end
 
     % --- C. FSM Logic ---
-    % Simple: joystick forward = walk, release = stand
-    WALK_SPEED = 0.15;  % m/s - forward walk
-    move_req = (joy.left_stick_y < -0.1);  % Joystick pushed forward
+    if USE_JOYSTICK
+        % Joystick control: forward = walk, release = stand
+        move_req = (joy.left_stick_y < -0.1);
+        v_des_body = [0; 0; 0];
+        des_yaw_rate = 0;
+        if move_req
+            v_des_body = [0.15; 0; 0];
+        end
+    else
+        % Direct velocity command (no joystick needed)
+        move_req = (abs(CMD_VEL_X) > 0.01) || (abs(CMD_VEL_Y) > 0.01);
+        v_des_body = [CMD_VEL_X; CMD_VEL_Y; 0];
+        des_yaw_rate = CMD_YAW_RATE;
+    end
 
     switch current_fsm_state
         case FSM_STAND
@@ -197,18 +216,10 @@ while true
             end
     end
 
-    % Fixed forward speed when walking, no lateral movement
-    if move_req
-        v_des_body = [WALK_SPEED; 0; 0];
-    else
-        v_des_body = [0; 0; 0];
-    end
-
     yaw = state.rpy(3);
     R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
     v_des_world = R_z * v_des_body;
-    body_omega_cmd = [0; 0; 0];  % No yaw control for now
-    des_yaw_rate = 0;  % No yaw control
+    body_omega_cmd = [0; 0; des_yaw_rate];
     des_pitch = 0;  % No pitch control for now
 
     % --- D. State Execution ---
