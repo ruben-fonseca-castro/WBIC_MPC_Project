@@ -1,123 +1,160 @@
 function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_wbic_controller(state, params)
+    % Runs the entire wbic controller based on current/incoming state, joystick, and mpc plan
 
-    tau_j = zeros(12,1);
-    q_j_cmd = state.qj_pos;
-    q_j_vel_cmd = zeros(12,1);
-    contact_state = zeros(4,1);
-    f_r_final = zeros(12,1);  % Initialize final forces output
+    % Initialize variables
+
+    tau_j = zeros(12,1); % 3 motors per leg, 4 legs --> 12 total feedforward torques
+    q_j_cmd = state.qj_pos; % this seems to set the commanded angle to the current position of the joint, why?
+    q_j_vel_cmd = zeros(12,1); % initializes all joint velocity commands to 0
+    contact_state = zeros(4,1); % im assuming this stores whether a leg should be contacting the ground or not?
+    f_r_final = zeros(12,1);  % Initialize final forces output as zero
     
     % Debug Counter
+
     persistent wbic_cnt;
     if isempty(wbic_cnt), wbic_cnt = 0; end
     wbic_cnt = wbic_cnt + 1;
     do_print = (mod(wbic_cnt, 20) == 0); % Print every 0.5s
 
     % Persistent state for event-based contact detection
-    persistent prev_contact_state;
+
+    persistent prev_contact_state; % basically same as static in cpp, holds the values bw function calls
+
     if isempty(prev_contact_state)
-        prev_contact_state = ones(4, 1);  % Start in stance
+        prev_contact_state = ones(4, 1);  % Start in stance (1 = contact, 0 = floating)
     end
 
     try
         %% --- 1. Setup Dynamics ---
-        q_pos_curr = state.qj_pos;
-        H = reshape(state.inertia_mat, [18, 18]); 
-        C = state.bias_force;                     
-        J_c = reshape(state.J_gc, [12, 18]);      
+
+        q_pos_curr = state.qj_pos; % extract current position locally from the current state
+        H = reshape(state.inertia_mat, [18, 18]); % extract mass matrix from the lcm state
+
+        C = state.bias_force; % extract coriolis from lcm state                     
+        J_c = reshape(state.J_gc, [12, 18]); % extract contact jacobian, wtf is this again??      
         
-        H_f = H(1:6, :); H_ff = H(1:6, 1:6); H_j = H(7:18, :);      
-        C_f = C(1:6); C_j = C(7:18);        
-        JcT_f = J_c(:, 1:6)'; JcT_j = J_c(:, 7:18)';  
+        H_f = H(1:6, :); H_ff = H(1:6, 1:6); H_j = H(7:18, :); % partitions the mass matrix into 3 smaller matrices for later use       
+        C_f = C(1:6); C_j = C(7:18); % separates the bias force for the centroid dof (C_f), and joint bias (C_j)         
+        JcT_f = J_c(:, 1:6)'; JcT_j = J_c(:, 7:18)'; % gets the contact jacobian transpose for the centroid/free dof (f), and joint (j)   
 
-        %% --- 2. Setup MPC Plan (MOCK / STANDALONE) ---
+        %% --- 2. Setup MPC Plan (MOCK / STANDALONE) --- 
 
-        if ~isjava(params.mpc_plan) || isempty(params.mpc_plan)
-            MASS = 12.45; GRAVITY = 9.81;
+        if ~isjava(params.mpc_plan) || isempty(params.mpc_plan) % if the mpc plan doesn't exist/is empty, create a mock mpc plan for wbic to follow
+            MASS = 12.45; 
+            GRAVITY = 9.81;
             mock_plan = struct();
-            mock_plan.contact = [1;1;1;1];
+            mock_plan.contact = [1;1;1;1]; % mock plan commands all legs standing
 
-            % Calculate center of support
-            feet_x = state.p_gc([1, 4, 7, 10]);
-            feet_y = state.p_gc([2, 5, 8, 11]);
-            center_x = mean(feet_x);
-            center_y = mean(feet_y);
+            % Calculate center of support (global frame)
+
+            feet_x = state.p_gc([1, 4, 7, 10]); %takes the current position of the ground contact feet for all legs, x components
+            feet_y = state.p_gc([2, 5, 8, 11]); %takes the current position of the ground contact feet for all legs, y components
+            center_x = mean(feet_x); % takes the mean of the x's for the center x
+            center_y = mean(feet_y); % takes the mean of the y's for the center y
 
             % Target: Centered over feet at specific height
-            height = 0.35;
-            mock_plan.body_pos_cmd = [center_x; center_y; height];
-            mock_plan.body_rpy_cmd = [0;0;0];
-            mock_plan.body_vel_cmd = zeros(3,1);
-            mock_plan.body_omega_cmd = zeros(3,1);
-            mock_plan.foot_pos_cmd = state.p_gc;
-            mock_plan.foot_vel_cmd = zeros(12,1);
+            
+            height = 0.35; %global frame, arbitrary, we should adjust this and see if dog rests at different heights!!
 
-            % --- Compute reaction forces using QP (like simplified MPC) ---
+            mock_plan.body_pos_cmd = [center_x; center_y; height]; % mock mpc global body xyz target coords
+            mock_plan.body_rpy_cmd = [0;0;0]; % body roll pitch yaw [radians] in global frame target, all 0 for mock
+            mock_plan.body_vel_cmd = zeros(3,1); % global frame velocity of centroid/body, 0 for mock
+            mock_plan.body_omega_cmd = zeros(3,1); % [rad/s] rotational velocities in body frame, 0 for mock
+            mock_plan.foot_pos_cmd = state.p_gc; % global frame sets foot position target to current foot position xyz for each leg (12 total)
+            mock_plan.foot_vel_cmd = zeros(12,1); % global frame velocity targets for each foot --> 0 for all
+
+            % --- Compute reaction forces using QP for Mock MPC ---
+
             % This distributes forces to achieve equilibrium + orientation correction
-            p_com = state.position;
-            p_feet = reshape(state.p_gc, [3, 4]);
+
+            p_com = state.position; % extracts current com position in global frame
+            p_feet = reshape(state.p_gc, [3, 4]); % global frame foot positions, each row is x,y,z, each column feet 1-4
 
             % Build force distribution matrix
             % [sum of forces = mg] and [sum of moments = desired moment]
-            A_fd = zeros(6, 12);
-            for i = 1:4
+
+            A_fd = zeros(6, 12); % wrench map matrix, rows 1-3 total force from all feet, rows 4-6 total moments about COM
+
+            for i = 1:4 % for each leg
                 idx = (i-1)*3 + (1:3);
-                A_fd(1:3, idx) = eye(3);  % Force sum
-                r_i = p_feet(:, i) - p_com;
-                A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum
+                A_fd(1:3, idx) = eye(3);  % Force sum, each leg contributes its own force to total
+                r_i = p_feet(:, i) - p_com; % positional vector from com to a given foot, in global
+                A_fd(4:6, idx) = skew_matrix(r_i);  % Moment sum, each foot contributes a moment based on vector from COM
             end
 
             % Desired wrench: gravity compensation + orientation correction
             % Add moment to correct pitch/roll errors (negative feedback)
-            kp_ori = 50;  % Orientation correction gain
+
+            kp_ori = 50;  % Orientation correction gain, does changing this affect the SS pos of doggy?
             % Negative sign: if pitched forward (+), apply backward moment (-)
-            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0];
-            b_fd = [0; 0; MASS * GRAVITY; desired_moment];
+
+            % sets the desired moment (corrective) as a P controller with current state roll and pitch, and always
+            % setting yaw to 0. Will only ever have a potential desired moment along roll and pitch directions
+
+            % besides, dog still pitches up a bit for just the wbic, how come, is it some sort of initialization thingy??
+            % should just remain level, yet no clue!!!
+
+            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0]; % but honestly, shoulnd't his just be zero?? Test it!!!
+
+            b_fd = [0; 0; MASS * GRAVITY; desired_moment]; % [6,1], Fz,Fy,Fz,Mr,Mp,My
 
             % QP to find forces: min ||f||^2 s.t. A*f = b, friction cone
-            H_fd = eye(12);
-            f_fd = zeros(12, 1);
 
-            % Friction cone constraints
+            H_fd = eye(12); % spreads loads evenly among legs
+            f_fd = zeros(12, 1); % causes QP to prefer small forces
+
+            % Friction cone constraints (inequality constraints), A_ineq * x <= b_ineq 
+            % this code actually dowuble flips the negative, but still works to enforce friction cone
+
             mu = 0.6;
-            W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1];
-            A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg);
-            b_ineq_fd = zeros(20, 1);
+            W_leg = [-1 0 mu; 1 0 mu; 0 -1 mu; 0 1 mu; 0 0 1]; % weights for inequality wrt leg force
+            A_ineq_fd = -blkdiag(W_leg, W_leg, W_leg, W_leg); % builds a huge matrix for each leg
+            b_ineq_fd = zeros(20, 1); % b_ineq
 
-            opts = optimoptions('quadprog', 'Display', 'off');
-            [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts);
+            % Solve the QP, min_f s.t. 1/2 f^T * H_fd * f, eq: A_fd * f = b_fd, ineq: A_ineq * f <= b_ineq
 
-            if exitflag == 1
-                mock_plan.reaction_force = f_sol;
-            else
-                % Fallback to equal forces
-                f_z = (MASS * GRAVITY) / 4;
-                mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1);
+            opts = optimoptions('quadprog', 'Display', 'off'); % sets options for solver
+            [f_sol, ~, exitflag] = quadprog(H_fd, f_fd, A_ineq_fd, b_ineq_fd, A_fd, b_fd, [], [], [], opts); % solves the bloody thing
+
+            if exitflag == 1 % if QP optimal, use the solution
+                
+                mock_plan.reaction_force = f_sol; % sets plan reaction force equal to force solve
+
+            else % otherwise, Fallback to equal forces
+                
+                f_z = (MASS * GRAVITY) / 4; % trivial distribution of forces among legs
+                mock_plan.reaction_force = repmat([0; 0; f_z], 4, 1); %gives each leg 1/4 of gravity to deal w along z axis
                 if do_print
                     fprintf('[WBIC Standalone] Force distribution QP failed, using equal forces\n');
                 end
             end
 
-            params.mpc_plan = mock_plan;
+            params.mpc_plan = mock_plan; % sets the mpc to the mock plan
         end
-        
-        f_r_mpc = params.mpc_plan.reaction_force;
-        contact_cmd = params.mpc_plan.contact;
 
-        p_gc_curr = reshape(state.p_gc, [3, 4]);
+        % MPC done, moving into WBIC/Lower Level
+
+        f_r_mpc = params.mpc_plan.reaction_force; % extract planned reaction force into local
+        contact_cmd = params.mpc_plan.contact; % extract contact plan into local
+
+        p_gc_curr = reshape(state.p_gc, [3, 4]); % gets current ground contact global position for each leg
 
         %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
-        % Use force feedback to detect early touch-down during swing
-        force_threshold = 20.0;  % N - threshold for touch-down detection
-        contact_state = zeros(4, 1);
+        % Use force feedback to detect early touch-down during swing, the fuck is this??!!
+
+        force_threshold = 20.0;  % N - threshold for touch-down detection??
+        contact_state = zeros(4, 1); % creates a new contact state
 
         for leg = 1:4
-            % Extract foot force magnitude from reaction forces
+            % Extract foot force magnitude from reaction forces, wait but these are being extracted from the plan, not the actualy forces??
             idx = 3*leg-2:3*leg;
             foot_force = norm(f_r_mpc(idx));
 
             % Event-based override: if MPC commands swing BUT force detected -> switch to stance
+            % !!!well force isn't being detected, this is the commanded force from MPC, so not working as intended??!!
+
             if contact_cmd(leg) == 0 && foot_force > force_threshold
-                % Early touch-down detected!
+                % Early touch-down detected! I DONT THINK SO :||||
                 contact_state(leg) = 1;
             else
                 % Use MPC contact command
@@ -126,19 +163,21 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
 
         % Update previous contact state
+
         prev_contact_state = contact_state;
 
         % Use trajectories from MPC (already generated with Bézier/stance modulation)
-        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]);
+
+        p_gc_des = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]); % extracts desired global foot positions from mpc
 
         try
-            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
+            v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); % try to extract global foot EE velocities
         catch
-            v_gc_des = zeros(3, 4);
+            v_gc_des = zeros(3, 4); % set to zero if errors out??? does this happen a lot? print if so!!?
         end
         
-        q_dot_full = [state.velocity; state.omega; state.qj_vel];
-        v_gc_act = J_c * q_dot_full; 
+        q_dot_full = [state.velocity; state.omega; state.qj_vel]; % does this extract all the velocities in general?
+        v_gc_act = J_c * q_dot_full; % what does this do? 
 
         %% --- 3. WEIGHTED SUM TASK CONTROL ---
         % All tasks are combined using a fixed weighted sum approach
@@ -149,11 +188,15 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         kp_base = 100; kd_base = 10;
 
         % Gain scheduling: Use different gains for standing vs. locomotion
+
         % Standing: Lower gains to avoid oscillations and noise amplification
         % Locomotion: Higher gains (Hyun et al. 2014) for aggressive tracking
-        n_legs_in_contact = sum(contact_state);
-        if n_legs_in_contact == 4
-            % All feet in stance = standing mode
+
+        n_legs_in_contact = sum(contact_state); % this relies on that weird logic I found, could 
+        % be providing false positives on dynamics if in reality this contact state ins't accurate
+
+        if n_legs_in_contact == 4 % this directly checks legs in contact, shouldn't this be handled more explicitity with a dynamics state that is set/maintained?
+            % All feet in stance = standing mode 
             kp_foot = 100; kd_foot = 10;  % Original stable gains
             gait_mode_str = 'STAND';
         else
@@ -162,6 +205,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             gait_mode_str = 'TROT';
         end 
 
+
         % --- TASK 0: Stance Constraints ---
         J_stance = [];
         for i = 1:4
@@ -169,13 +213,14 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
         
         if ~isempty(J_stance)
-            x_ddot_0 = zeros(size(J_stance, 1), 1);  % Zero acceleration for stance feet
+            x_ddot_0 = zeros(size(J_stance, 1), 1);  % Zero acceleration for stance feet, what if we're moving, should this be enforced?
         else
             J_stance = zeros(0, 18);  % Empty matrix if no stance legs
             x_ddot_0 = zeros(0, 1);
         end
 
         % --- TASK 1: Body Orientation ---
+
         J_1 = [zeros(3,3), eye(3), zeros(3,12)]; 
         rot_err = params.mpc_plan.body_rpy_cmd - state.rpy;
         omega_err = params.mpc_plan.body_omega_cmd - state.omega;
@@ -185,16 +230,21 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % Store for debug
         ori_err_deg = rot_err * 180/pi;
 
+
         % --- TASK 2: Body Position ---
+
         J_2 = [eye(3), zeros(3,3), zeros(3,12)]; 
         pos_err = params.mpc_plan.body_pos_cmd - state.position;
         vel_err = params.mpc_plan.body_vel_cmd - state.velocity;
         x_ddot_2 = kp_base * pos_err + kd_base * vel_err;
 
         % Store for debug
+
         pos_err_m = pos_err;
 
+
         % --- TASK 3: Swing Foot ---
+
         J_swing = []; x_ddot_3 = [];
         for i = 1:4
             if contact_state(i) == 0
@@ -212,8 +262,11 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             x_ddot_3 = zeros(0, 1);
         end
 
+
         % --- WEIGHTED SUM SOLUTION ---
         % Stack all tasks: J_all * q_ddot = x_ddot_all
+
+
         J_all = [J_stance; J_1; J_2; J_swing];
         x_ddot_all = [x_ddot_0; x_ddot_1; x_ddot_2; x_ddot_3];
         
@@ -238,18 +291,22 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         
         % Solve weighted least squares: min ||W^(1/2) * (J_all * q_ddot - x_ddot_all)||^2
         % Using regularization for numerical stability
+
         reg = 1e-6;  % Small regularization term
+
         q_ddot_cmd = (J_all' * W * J_all + reg * eye(18)) \ (J_all' * W * x_ddot_all);
 
         
 
         % Joint Integration
-        dt_wbic = 0.002; 
+
+        dt_wbic = 0.002; % huh??? shouldn't it be 0.001???
         q_j_acc = q_ddot_cmd(7:18);
         q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
         q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic;
 
-        %% --- 4. QP SOLVER ---
+        %% --- 4. QP SOLVER FOR WBIC ---
+
         n_vars = 18;
         Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6);
         H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1);
@@ -311,6 +368,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
 
         % ===================== WBIC DEBUG LOGGING =====================
+
         if do_print
             fprintf('\n================ WBIC DEBUG [%d] ================\n', wbic_cnt);
             fprintf('Mode: %s | Gains: kp=%d kd=%d | QP flag=%d %s\n', ...
