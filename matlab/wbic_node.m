@@ -118,6 +118,8 @@ while true
     % Could be the case that we are actually running slower than we think, let's log how much a loop takes
     % up unitl this point with a print statement or something, just to confirm we are actually running in time!!
 
+    % fprintf('Loop time: %f seconds\n', toc(loop_start)); 
+
     pause(max(0, params.dt - toc(loop_start)));
     
 end

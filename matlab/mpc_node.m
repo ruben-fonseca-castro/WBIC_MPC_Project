@@ -53,7 +53,7 @@ cmd_body_height = 0.35;  % Reduced to match typical standing height
 %% ==================== VELOCITY COMMAND (TUNE HERE) ====================
 % Set USE_JOYSTICK = false to command velocity directly without joystick
 USE_JOYSTICK = false;
-CMD_VEL_X = 0.15;   % [m/s] Forward velocity (+ = forward)
+CMD_VEL_X = 0.05;   % [m/s] Forward velocity (+ = forward)
 CMD_VEL_Y = 0.0;    % [m/s] Lateral velocity (+ = left)
 CMD_YAW_RATE = 0.0; % [rad/s] Yaw rate (+ = CCW)
 %% =======================================================================

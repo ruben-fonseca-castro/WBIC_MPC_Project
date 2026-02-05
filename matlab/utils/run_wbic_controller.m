@@ -54,7 +54,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
             % Target: Centered over feet at specific height
             
-            height = 0.35; %global frame, arbitrary, we should adjust this and see if dog rests at different heights!!
+            height = 0.38; %global frame, arbitrary, this does respond to this, so we good
 
             mock_plan.body_pos_cmd = [center_x; center_y; height]; % mock mpc global body xyz target coords
             mock_plan.body_rpy_cmd = [0;0;0]; % body roll pitch yaw [radians] in global frame target, all 0 for mock
@@ -140,24 +140,21 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         p_gc_curr = reshape(state.p_gc, [3, 4]); % gets current ground contact global position for each leg
 
         %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
-        % Use force feedback to detect early touch-down during swing, the fuck is this??!!
+        % Use actual force feedback (state.foot_force) to detect early touch-down
+        % during swing: if the MPC commands swing but the foot already has measurable
+        % ground contact force, switch to stance for that leg.
 
-        force_threshold = 20.0;  % N - threshold for touch-down detection??
-        contact_state = zeros(4, 1); % creates a new contact state
+        force_threshold = 20.0;  % N - threshold for touch-down detection
+        contact_state = zeros(4, 1);
 
         for leg = 1:4
-            % Extract foot force magnitude from reaction forces, wait but these are being extracted from the plan, not the actualy forces??
-            idx = 3*leg-2:3*leg;
-            foot_force = norm(f_r_mpc(idx));
+            % Use measured/estimated foot force from robot state (not planned force)
+            foot_force_actual = state.foot_force(leg);
 
-            % Event-based override: if MPC commands swing BUT force detected -> switch to stance
-            % !!!well force isn't being detected, this is the commanded force from MPC, so not working as intended??!!
-
-            if contact_cmd(leg) == 0 && foot_force > force_threshold
-                % Early touch-down detected! I DONT THINK SO :||||
-                contact_state(leg) = 1;
+            % Event-based override: MPC says swing but actual force above threshold -> early touch-down
+            if contact_cmd(leg) == 0 && foot_force_actual > force_threshold
+                contact_state(leg) = 1;  % Early touch-down detected
             else
-                % Use MPC contact command
                 contact_state(leg) = contact_cmd(leg);
             end
         end
@@ -300,7 +297,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         % Joint Integration
 
-        dt_wbic = 0.002; % huh??? shouldn't it be 0.001???
+        dt_wbic = params.dt; % uses the dt from the params struct, which is 0.001
         q_j_acc = q_ddot_cmd(7:18);
         q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
         q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic;
