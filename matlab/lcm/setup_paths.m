@@ -16,8 +16,8 @@ function setup_paths(person_select)
     elseif strcmp(person_select,'Ruben_Linux')
         % --- Ubuntu / Linux Paths ---
         disp('Linux/Unix system detected.');
-        lcm_lib_path = '/home/rubenafc/miniconda3/envs/arcpy/lib/python3.9/site-packages/share/java/lcm.jar';
-        project_dir = '/home/rubenafc/Documents/LRC_Final_Project/arc-bridge';
+        lcm_lib_path = '/home/atombot/miniconda3/envs/arcpy/lib/python3.9/site-packages/share/java/lcm.jar';
+        project_dir = '/home/atombot/Documents/Ruben_Work/Leg_MPC_Project/WBIC_MPC_Project/arc_bridge';
 
     elseif strcmp(person_select,'Pranav')
         % --- Windows Paths ---

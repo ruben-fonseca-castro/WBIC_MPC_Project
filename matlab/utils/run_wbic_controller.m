@@ -140,14 +140,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         q_dot_full = [state.velocity; state.omega; state.qj_vel];
         v_gc_act = J_c * q_dot_full; 
 
-        %% --- 3. KINEMATIC HIERARCHY ---
-        % Task 0: Stance Constraints (Hard)
-        % Task 1: Body Orientation (Highest Task)
-        % Task 2: Body Position
-        % Task 3: Swing Foot Position (Lowest)
-        
-        q_ddot_prev = zeros(18, 1); 
-        N_prev = eye(18);
+        %% --- 3. WEIGHTED SUM TASK CONTROL ---
+        % All tasks are combined using a fixed weighted sum approach
+        % (replaces null-space projection method)
+        % Task priorities: Stance >> Orientation > Position > Swing
         
         % Paper Table I gains
         kp_base = 100; kd_base = 10;
@@ -173,11 +169,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
         
         if ~isempty(J_stance)
-            x_ddot_0 = zeros(size(J_stance, 1), 1); 
-            J_pre_0 = J_stance; J_bar_0 = dynamic_pinv(J_pre_0, H);
-            q_ddot_0 = J_bar_0 * x_ddot_0;
-            N_prev = eye(18) - J_bar_0 * J_pre_0; 
-            q_ddot_prev = q_ddot_0;
+            x_ddot_0 = zeros(size(J_stance, 1), 1);  % Zero acceleration for stance feet
+        else
+            J_stance = zeros(0, 18);  % Empty matrix if no stance legs
+            x_ddot_0 = zeros(0, 1);
         end
 
         % --- TASK 1: Body Orientation ---
@@ -187,11 +182,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         x_ddot_1 = 0 * kp_base * rot_err + 0 * kd_base * omega_err;
         % fprintf("nuking body orientation");
         
-        J_pre_1 = J_1 * N_prev; J_bar_1 = dynamic_pinv(J_pre_1, H);
-        q_ddot_1 = q_ddot_prev + J_bar_1 * (x_ddot_1 - J_pre_1 * q_ddot_prev);
-        J_pinv_1 = pinv(J_pre_1); N_prev = N_prev * (eye(18) - J_pinv_1 * J_pre_1);
-        q_ddot_prev = q_ddot_1; 
-        
         % Store for debug
         ori_err_deg = rot_err * 180/pi;
 
@@ -200,11 +190,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         pos_err = params.mpc_plan.body_pos_cmd - state.position;
         vel_err = params.mpc_plan.body_vel_cmd - state.velocity;
         x_ddot_2 = kp_base * pos_err + kd_base * vel_err;
-        
-        J_pre_2 = J_2 * N_prev; J_bar_2 = dynamic_pinv(J_pre_2, H);
-        q_ddot_2 = q_ddot_prev + J_bar_2 * (x_ddot_2 - J_pre_2 * q_ddot_prev);
-        J_pinv_2 = pinv(J_pre_2); N_prev = N_prev * (eye(18) - J_pinv_2 * J_pre_2);
-        q_ddot_prev = q_ddot_2;
 
         % Store for debug
         pos_err_m = pos_err;
@@ -222,13 +207,41 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             end
         end
         
-        if ~isempty(J_swing)
-            J_pre_3 = J_swing * N_prev; J_bar_3 = dynamic_pinv(J_pre_3, H);
-            q_ddot_3 = q_ddot_prev + J_bar_3 * (x_ddot_3 - J_pre_3 * q_ddot_prev);
-            q_ddot_cmd = q_ddot_3;
-        else
-            q_ddot_cmd = q_ddot_prev;
+        if isempty(J_swing)
+            J_swing = zeros(0, 18);  % Empty matrix if no swing legs
+            x_ddot_3 = zeros(0, 1);
         end
+
+        % --- WEIGHTED SUM SOLUTION ---
+        % Stack all tasks: J_all * q_ddot = x_ddot_all
+        J_all = [J_stance; J_1; J_2; J_swing];
+        x_ddot_all = [x_ddot_0; x_ddot_1; x_ddot_2; x_ddot_3];
+        
+        % Priority weights: higher weight = higher priority
+        % Stance gets very high weight (almost hard constraint)
+        % Orientation > Position > Swing
+        w_stance = 1e6;   % Very high priority for stance constraints
+        w_orientation = 1000;
+        w_position = 100;
+        w_swing = 1;
+        
+        % Build diagonal weight matrix
+        n_stance = size(J_stance, 1);
+        n_orientation = 3;
+        n_position = 3;
+        n_swing = size(J_swing, 1);
+        
+        W = diag([w_stance * ones(n_stance, 1); ...
+                  w_orientation * ones(n_orientation, 1); ...
+                  w_position * ones(n_position, 1); ...
+                  w_swing * ones(n_swing, 1)]);
+        
+        % Solve weighted least squares: min ||W^(1/2) * (J_all * q_ddot - x_ddot_all)||^2
+        % Using regularization for numerical stability
+        reg = 1e-6;  % Small regularization term
+        q_ddot_cmd = (J_all' * W * J_all + reg * eye(18)) \ (J_all' * W * x_ddot_all);
+
+        
 
         % Joint Integration
         dt_wbic = 0.002; 

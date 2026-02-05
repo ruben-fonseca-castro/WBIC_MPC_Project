@@ -10,7 +10,7 @@ addpath('gait/');
 disp('--- WBIC Controller ---');
 
 %% 1. Setup
-person_select = 'David';
+person_select = 'Ruben_Linux';
 setup_paths(person_select);
 params = initialize_controller_state();
 [lc, agg_state, agg_joy, agg_plan] = setup_lcm(params);
