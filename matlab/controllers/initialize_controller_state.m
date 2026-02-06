@@ -5,7 +5,7 @@ function params = initialize_controller_state()
 
     % --- Control Timing ---
 
-    params.control_freq = 1000; % Frequency of 1000 Hz
+    params.control_freq = 700; % Frequency of 1000 Hz
     params.dt = 1.0 / params.control_freq; % WBIC period of 0.001 s
 
     % --- LCM Channels ---
