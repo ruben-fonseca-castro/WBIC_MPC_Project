@@ -22,4 +22,5 @@ struct mpc_plan_t
     // Desired foot positions [12x1]
     // (p_x, p_y, p_z) for each of the 4 feet
     double foot_pos_cmd[12];
+    double foot_vel_cmd[12];
 }

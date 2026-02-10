@@ -53,7 +53,7 @@ cmd_body_height = 0.35;  % Reduced to match typical standing height
 %% ==================== VELOCITY COMMAND (TUNE HERE) ====================
 % Set USE_JOYSTICK = false to command velocity directly without joystick
 USE_JOYSTICK = false;
-CMD_VEL_X = 0.05;   % [m/s] Forward velocity (+ = forward)
+CMD_VEL_X = 0.04;   % [m/s] Forward velocity (+ = forward)
 CMD_VEL_Y = 0.0;    % [m/s] Lateral velocity (+ = left)
 CMD_YAW_RATE = 0.0; % [rad/s] Yaw rate (+ = CCW)
 %% =======================================================================
@@ -432,7 +432,7 @@ while true
     plan_msg.body_vel_cmd = body_vel_cmd;
     plan_msg.body_omega_cmd = body_omega_cmd;
     plan_msg.foot_pos_cmd = foot_pos_cmd_world;
-    try, plan_msg.foot_vel_cmd = foot_vel_cmd_world; catch, end
+    plan_msg.foot_vel_cmd = foot_vel_cmd_world;
     
     lc.publish(params.PLAN_CHANNEL, plan_msg);
 
@@ -543,6 +543,9 @@ while true
 
         fprintf('=======================================================\n\n');
     end
+
+    % fprintf('Loop time: %f seconds\n', toc(loop_start)); 
+
 end
 
 function str = force_status(actual, expected)

@@ -54,7 +54,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
             % Target: Centered over feet at specific height
             
-            height = 0.38; %global frame, arbitrary, this does respond to this, so we good
+            height = 0.35; %global frame, arbitrary, this does respond to this, so we good
 
             mock_plan.body_pos_cmd = [center_x; center_y; height]; % mock mpc global body xyz target coords
             mock_plan.body_rpy_cmd = [0;0;0]; % body roll pitch yaw [radians] in global frame target, all 0 for mock
@@ -85,7 +85,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             % Desired wrench: gravity compensation + orientation correction
             % Add moment to correct pitch/roll errors (negative feedback)
 
-            kp_ori = 50;  % Orientation correction gain, does changing this affect the SS pos of doggy?
+            kp_ori = 75;  % Orientation correction gain, does changing this affect the SS pos of doggy?
             % Negative sign: if pitched forward (+), apply backward moment (-)
 
             % sets the desired moment (corrective) as a P controller with current state roll and pitch, and always
@@ -93,7 +93,8 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
             % besides, dog still pitches up a bit, although much less noticeable, barely see wack deviations in the log anymore
 
-            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0]; % but honestly, shoulnd't his just be zero?? Test it!!!
+            desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0]; %maybe adjust this?? SS error most likely exist
+            
 
             b_fd = [0; 0; MASS * GRAVITY; desired_moment]; % [6,1], Fz,Fy,Fz,Mr,Mp,My
 
@@ -143,7 +144,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % during swing: if the MPC commands swing but the foot already has measurable
         % ground contact force, switch to stance for that leg.
 
-        force_threshold = 20.0;  % N - threshold for touch-down detection
+        force_threshold = 15.0;  % N - threshold for touch-down detection
         contact_state = zeros(4, 1);
 
         for leg = 1:4
@@ -170,6 +171,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             v_gc_des = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]); % try to extract global foot EE velocities
         catch
             v_gc_des = zeros(3, 4); % set to zero if errors out??? does this happen a lot? print if so!!?
+            fprintf('foot_vel set to zero!!!!')
         end
         
         q_dot_full = [state.velocity; state.omega; state.qj_vel]; % does this extract all the velocities in general?
@@ -221,7 +223,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         J_1 = [zeros(3,3), eye(3), zeros(3,12)]; % creates a mega jacobian, columns 4-6 deal with orientation so those are active
         rot_err = params.mpc_plan.body_rpy_cmd - state.rpy; % subtracts mpc planned rpy from actual
         omega_err = params.mpc_plan.body_omega_cmd - state.omega; % subtracts planned rot vel from actual rot vel
-        x_ddot_1 = 0 * kp_base * rot_err + 0 * kd_base * omega_err; % wait so, why is this multiying by zero?? no x_ddot influence
+        x_ddot_1 = 1 * kp_base * rot_err + 1 * kd_base * omega_err; % wait so, why is this multiying by zero?? no x_ddot influence
         % CHECK ^^ IF THIS IS WHAT IS CAUSING THE PITCHING UP SHIT IN FULL MPC, EVEN DRIFTING IN WBIC ONLY MODE TOO
         % fprintf("nuking body orientation");
         
@@ -272,10 +274,10 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % Priority weights: higher weight = higher priority
         % Stance gets very high weight (almost hard constraint)
         % Orientation > Position > Swing
-        w_stance = 1e6;   % Very high priority for stance constraints, why??
-        w_orientation = 1000;
-        w_position = 100;
-        w_swing = 1;
+        w_stance = 1100;   % Very high priority for stance constraints
+        w_orientation = 700;
+        w_position = 500;
+        w_swing = 500;
         
         % Build diagonal weight matrix
         n_stance = size(J_stance, 1);
@@ -303,14 +305,17 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         dt_wbic = params.dt; % uses the dt from the params struct, which is 0.001
         q_j_acc = q_ddot_cmd(7:18); % extracts the joint acclerations from the mega accleration command
-        q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic; % commanded vel is current vel + accel * dt
-        q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic; % commanded position is current pos + commanded vel * dt
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic; % commanded vel is current vel + accel * dt
+        % q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic; % commanded position is current pos + commanded vel * dt
+
+        q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
+        q_j_cmd     = state.qj_pos + state.qj_vel * dt_wbic + 0.5 * q_j_acc * dt_wbic^2;
 
 
         %% --- 4. QP SOLVER FOR WBIC ---
 
         n_vars = 18; % 12 joints, 6 body dof
-        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6); % whqdratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
+        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
         % ^ rn, reaction force tracking is prioritized over floating base accel tracking
         H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1); % buils the quadratic cost, multiplies by 2, sets linear cost to 0
 
@@ -320,7 +325,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         A_dyn = [H_ff, -JcT_f];
         b_dyn = (JcT_f * f_r_mpc) - (H_f * q_ddot_cmd) - C_f;
 
-        % Swing foot zero force constraints (unchanged)
+        % Swing foot zero force constraints
 
         A_swing_const = []; b_swing_const = [];
 
@@ -334,7 +339,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         A_eq = [A_dyn; A_swing_const]; b_eq = [b_dyn; b_swing_const];
 
-        % FIX 2: Friction cone ONLY for stance legs
+        % Friction cone ONLY for stance legs
 
         mu = 0.6;  % Match MPC friction coefficient
         W_leg = [ -1, 0, mu; 1, 0, mu; 0,-1, mu; 0, 1, mu; 0, 0, 1 ];
