@@ -1,3 +1,6 @@
+%% MPC Controller Node
+% ONE THING TO TEST IMED: SEE HOW LONG THIS LOOP ACTUALLY TAKES, SEE IF ANY DT VALUES ARE INCONSISTENT
+
 clc;
 clear;
 clear functions; 
@@ -15,8 +18,8 @@ disp('--- MPC Controller Node (Walking Gait) ---');
 %% 1. CONFIGURATION & PARAMETERS
 %% ======================================================================== 
 
-MASS = 12.45; 
-GRAVITY = 9.81;
+MASS = 12.45; % of the doggy
+GRAVITY = 9.81; % acceleration [m/s^2]
 
 % A1 robot geometry (from a1.xml)
 HIP_OFFSET_Y = 0.047;
@@ -39,30 +42,33 @@ gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR togethe
 % Lateral sequence: FR -> RR -> FL -> RL (each 25% offset)
 % With 80% stance, more overlap between legs for stability
 gait_walk = struct();
-gait_walk.T_cycle = 2.0;           % Fixed cycle for stability
+gait_walk.T_cycle = 2.0;           % Fixed cycle for stability, I should modify and see how it affects
 gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
 gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
 
-current_gait = gait_walk;  % Full walk gait - all 4 legs take turns (stationary test)
+current_gait = gait_walk;  % Full walk gait - all 4 legs take turns
 
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
-swing_height = 0.04;  % 4cm - increased clearance for forward walking
-cmd_body_height = 0.35;  % Reduced to match typical standing height
+swing_height = 0.04;  % 4cm
+cmd_body_height = 0.35;  % should probably match the height set in WBIC, or should be passed to it?? MPC -> WBIC HEIGHT
 
 %% ==================== VELOCITY COMMAND (TUNE HERE) ====================
-% Set USE_JOYSTICK = false to command velocity directly without joystick
-USE_JOYSTICK = false;
+
+USE_JOYSTICK = false; % Set USE_JOYSTICK = false to command velocity directly without joystick
+
+% false joystick setpoints
 CMD_VEL_X = 0.04;   % [m/s] Forward velocity (+ = forward)
 CMD_VEL_Y = 0.0;    % [m/s] Lateral velocity (+ = left)
 CMD_YAW_RATE = 0.0; % [rad/s] Yaw rate (+ = CCW)
+
 %% =======================================================================
 
 % MPC Solver
-mpc_freq = 40;
+mpc_freq = 40; % IS THIS ACTUALLY TRUE??? I DONT THINK SOOOOOO
 dt = 1.0 / mpc_freq;
-N_horizon = 20;  % 20 * 0.025s = 0.5s lookahead
-MU = 0.6;
+N_horizon = 20;  % 20 * 0.025s = 0.5s lookahead, is this standard??
+MU = 0.6; % friction coeff of leg EE
 
 %% ==================== MPC WEIGHTS (TUNE HERE) ====================
 % State vector: [roll, pitch, yaw, px, py, pz, wx, wy, wz, vx, vy, vz]
@@ -80,19 +86,19 @@ Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
                15, 15, 0.5, ...     % wx, wy, wz
                3, 3, 5]);           % vx, vy, vz
 
-% Force weights - allow asymmetric forces for orientation control
+% Force weights - allow asymmetric forces for orientation control, is this correct??
 R_leg_xy = 1e-4;  % Small penalty on lateral forces
 R_leg_z = 1e-5;   % Very small to allow force redistribution for balance
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
 %% =================================================================
 
-% Nominal force per leg (gravity compensation)
+% Nominal force per leg (gravity compensation), I don't understand why this is relevant later!!!??
 f_nominal = zeros(12, 1);
 f_nominal([3, 6, 9, 12]) = MASS * GRAVITY / 4;  % Fz for each leg
 
 FSM_STAND = 0;       
 FSM_LOCOMOTION = 1;  
-current_fsm_state = FSM_STAND; 
+current_fsm_state = FSM_STAND; % Start off in standing mode
 
 %% ========================================================================
 %% 2. SETUP & INITIALIZATION
@@ -103,19 +109,21 @@ person_select = 'Ruben_Linux';
 setup_paths(person_select);
 params = initialize_controller_state();
 
+% Set up LCM Communication
+
 lc = lcm.lcm.LCM.getSingleton();
 agg_state = lcm.lcm.MessageAggregator(); agg_state.setMaxMessages(1);
 agg_joy = lcm.lcm.MessageAggregator();   agg_joy.setMaxMessages(1);
 lc.subscribe(params.STATE_CHANNEL, agg_state);
 lc.subscribe(params.JOYSTICK_CHANNEL, agg_joy);
 
-plan_msg = lcm_msgs.mpc_plan_t();
+plan_msg = lcm_msgs.mpc_plan_t(); % create new blank mpc plan
 
 % A1 robot inertia (from a1.xml trunk inertial)
 I_body = diag([0.0159, 0.0378, 0.0457]);
 I_body_inv = inv(I_body);
 g_vec = [0; 0; -GRAVITY];
-g_hat_vec = [zeros(9, 1); g_vec * dt];
+g_hat_vec = [zeros(9, 1); g_vec * dt]; % this relies on dt, could cause diverging inaccuries if dt is innaccurate
 
 is_initialized = false;
 gait_timer = 0.0;
@@ -125,40 +133,44 @@ foot_pos_start = zeros(3, 4);
 debug_cnt = 0;
 
 % Trajectory generation state tracking
-prev_contact_state = ones(4, 1);  % Start in stance
-touchdown_positions = zeros(3, 4);
-leg_phase_timers = zeros(4, 1);  % Time since last state change per leg
-standing_foot_positions = zeros(3, 4);  % Fixed positions for standing mode
-standing_positions_locked = false;  % Lock positions after settling
-lock_timer = 0;  % Force lock after N seconds if criteria not met  
 
-joy = struct('left_stick_x',0,'left_stick_y',0,'right_stick_x',0,'right_stick_y',0);
+prev_contact_state = ones(4, 1);  % Start in stance
+touchdown_positions = zeros(3, 4); % xyz global positions of each foot upon touching down??
+leg_phase_timers = zeros(4, 1);  % Time since last state change per leg
+standing_foot_positions = zeros(3, 4);  % Fixed positions for standing mode, how is this used??
+standing_positions_locked = false;  % Lock positions after settling, ehh?? what if foot slips
+lock_timer = 0;  % Force lock after N seconds if criteria not met, how is this used??
+
+joy = struct('left_stick_x',0,'left_stick_y',0,'right_stick_x',0,'right_stick_y',0); % joy struct used to store controller vals
 
 disp('Waiting for robot state...');
 
 %% ========================================================================
 %% 3. MAIN CONTROL LOOP
 %% ========================================================================
+
 while true
     loop_start_time = tic;
     
     % --- A. Read Inputs ---
     state_msg = agg_state.getNextMessage(0); 
     if isempty(state_msg)
-        pause(0.001); continue; 
+        pause(0.001); continue; % if no new state, wait 0.001 sec, begin loop again
     end
-    state = lcm_msgs.unitree_a1_state_t(state_msg.data);
+    state = lcm_msgs.unitree_a1_state_t(state_msg.data); % reads in the new state vals from arc-bridge
     
     joy_msg = agg_joy.getNextMessage(0);
     if ~isempty(joy_msg)
-        joy = lcm_msgs.xbox_command_t(joy_msg.data);
+        joy = lcm_msgs.xbox_command_t(joy_msg.data); % update joy var if message isn't empty
     end
 
     % --- B. First Run Initialization ---
-    if ~is_initialized
-        current_cmd_pos = state.position;
-        current_cmd_pos(3) = cmd_body_height;
-        current_cmd_yaw = state.rpy(3);
+
+    if ~is_initialized % if not initialized
+
+        current_cmd_pos = state.position; % current commanded position is the actual REAL one?? why?
+        current_cmd_pos(3) = cmd_body_height; % overrites the commanded pos heieght to be the set one
+        current_cmd_yaw = state.rpy(3); % sets current commanded yaw to the ACTUAL REAL yaw?? seesms sensitive to noise?? deviations??
         foot_pos_start = reshape(state.p_gc, [3, 4]);
         touchdown_positions = foot_pos_start;  % Initialize touchdown positions
         standing_foot_positions = foot_pos_start;  % Fixed positions for standing
