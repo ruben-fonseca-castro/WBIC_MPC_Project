@@ -310,8 +310,9 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         %% --- 4. QP SOLVER FOR WBIC ---
 
         n_vars = 18; % 12 joints, 6 body dof
-        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6); % what is this
-        H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1); % what is this
+        Q1 = 1.0 * eye(12); Q2 = 0.1 * eye(6); % whqdratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
+        % ^ rn, reaction force tracking is prioritized over floating base accel tracking
+        H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1); % buils the quadratic cost, multiplies by 2, sets linear cost to 0
 
         % Floating base dynamics constraint
 
