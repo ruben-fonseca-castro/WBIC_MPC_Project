@@ -41,8 +41,8 @@ function params = initialize_controller_state()
     % kp = 5.0;  % Gentle feedback gain
     % kd = 0.5;
 
-    kp = 60;  % Gentle feedback gain
-    kd = 6;
+    kp = 50;  % Gentle feedback gain
+    kd = 3;
 
     params.KP_vec = ones(12, 1) * kp;
     params.KD_vec = ones(12, 1) * kd;

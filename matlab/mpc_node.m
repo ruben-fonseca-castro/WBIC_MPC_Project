@@ -50,7 +50,7 @@ current_gait = gait_walk;  % Full walk gait - all 4 legs take turns
 
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
-swing_height = 0.04;  % 4cm
+swing_height = 0.05;  % 4cm
 cmd_body_height = 0.35;  % should probably match the height set in WBIC, or should be passed to it?? MPC -> WBIC HEIGHT
 
 %% ==================== VELOCITY COMMAND (TUNE HERE) ====================
@@ -87,14 +87,20 @@ Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
                3, 3, 5]);           % vx, vy, vz
 
 % Force weights - allow asymmetric forces for orientation control, is this correct??
-R_leg_xy = 1e-4;  % Small penalty on lateral forces
-R_leg_z = 1e-5;   % Very small to allow force redistribution for balance
+R_leg_xy = 1e-5;  % Small penalty on lateral forces
+R_leg_z = 1e-6;   % Very small to allow force redistribution for balance
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
 %% =================================================================
 
-% Nominal force per leg (gravity compensation), I don't understand why this is relevant later!!!??
-f_nominal = zeros(12, 1);
-f_nominal([3, 6, 9, 12]) = MASS * GRAVITY / 4;  % Fz for each leg
+% Nominal force used in MPC cost.
+% NOTE: we do **not** keep a single global "mg/4 per leg" here, because the
+% number of stance legs changes during walking (3-leg support, 4-leg support,
+% etc.). Instead, a contact-aware nominal force is built inside the MPC
+% horizon loop so that:
+%   - Only stance legs receive a non-zero nominal load
+%   - The nominal vertical forces on all stance legs sum to MASS*GRAVITY
+% This avoids penalizing the optimizer for using the correct distribution
+% when some legs are in swing.
 
 FSM_STAND = 0;       
 FSM_LOCOMOTION = 1;  
@@ -171,10 +177,10 @@ while true
         current_cmd_pos = state.position; % current commanded position is the actual REAL one?? why?
         current_cmd_pos(3) = cmd_body_height; % overrites the commanded pos heieght to be the set one
         current_cmd_yaw = state.rpy(3); % sets current commanded yaw to the ACTUAL REAL yaw?? seesms sensitive to noise?? deviations??
-        foot_pos_start = reshape(state.p_gc, [3, 4]);
+        foot_pos_start = reshape(state.p_gc, [3, 4]); % set foot pos start to current ground contact point 
         touchdown_positions = foot_pos_start;  % Initialize touchdown positions
         standing_foot_positions = foot_pos_start;  % Fixed positions for standing
-        is_initialized = true;
+        is_initialized = true; % won't run this section again
 
         fprintf('\n========== MPC INITIALIZED ==========\n');
         fprintf('Initial State:\n');
@@ -202,6 +208,7 @@ while true
     end
 
     % --- C. FSM Logic ---
+
     if USE_JOYSTICK
         % Joystick control: forward = walk, release = stand
         move_req = (joy.left_stick_y < -0.1);
@@ -212,35 +219,47 @@ while true
         end
     else
         % Direct velocity command (no joystick needed)
-        move_req = (abs(CMD_VEL_X) > 0.01) || (abs(CMD_VEL_Y) > 0.01);
-        v_des_body = [CMD_VEL_X; CMD_VEL_Y; 0];
-        des_yaw_rate = CMD_YAW_RATE;
+        move_req = (abs(CMD_VEL_X) > 0.01) || (abs(CMD_VEL_Y) > 0.01); % is moving required? if either lateral or longitudinal vel is > 0.01, yes!
+        v_des_body = [CMD_VEL_X; CMD_VEL_Y; 0]; % sets desired body linear vel in global
+        des_yaw_rate = CMD_YAW_RATE; % sets the yaw rate (rn being overriden to 0)
     end
 
-    switch current_fsm_state
+    % Determine state, change states if necessary
+
+    switch current_fsm_state 
+
         case FSM_STAND
-            if move_req, current_fsm_state = FSM_LOCOMOTION; end
-        case FSM_LOCOMOTION
+
+            if move_req, current_fsm_state = FSM_LOCOMOTION; end % changes to locomotion if movement is required
+
+        case FSM_LOCOMOTION % if movement no longer required, and time left in gait is less than 2*dt, go back to stand, is this logic robust??
+
             time_left = current_gait.T_cycle - gait_timer;
+
             if ~move_req && (time_left < dt*2)
                 current_fsm_state = FSM_STAND;
                 gait_timer = 0.0;
             end
     end
 
+    % Extract current states??
+
     yaw = state.rpy(3);
     R_z = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
-    v_des_world = R_z * v_des_body;
-    body_omega_cmd = [0; 0; des_yaw_rate];
+    v_des_world = R_z * v_des_body; % converts desired lin vel in body to global frame using current yaw angle (assumes the bot isn't pitching or rolling significantly)
+    body_omega_cmd = [0; 0; des_yaw_rate]; % should also be zero rn
     des_pitch = 0;  % No pitch control for now
 
     % --- D. State Execution ---
-    if current_fsm_state == FSM_STAND
+
+    if current_fsm_state == FSM_STAND % if we are in stand mode
+
         % current_cmd_pos(1) = state.position(1); %modified this to test
         % something
 
-        current_cmd_pos(2) = state.position(2);
-        current_cmd_pos(3) = cmd_body_height;
+        current_cmd_pos(2) = state.position(2); % current commanded position is the state position???? doesn't this make this sensitive to noise/disturbances compared to nominal standing posture?
+        % ^ shouldn't this just be set once when the switchover happens (Loco to stand or starting off in stand), instead of always updating the command on the current measured pos??
+        current_cmd_pos(3) = cmd_body_height; % overrrites body height to set one in MPC rn, should prob be changed
         % current_cmd_yaw = state.rpy(3);  % REMOVED: This caused yaw drift by accepting actual as command
 
         % Calculate center of support --------- testing bs
@@ -252,21 +271,27 @@ while true
         % current_cmd_pos(1) = center_x;
         % current_cmd_pos(2) = center_y;
         % current_cmd_pos(3) = cmd_body_height;
-        % current_cmd_yaw = 0;
 
-        contact_cmd = [1; 1; 1; 1];
-    else
-        gait_timer = mod(gait_timer + dt, current_gait.T_cycle);
-        current_cmd_pos = current_cmd_pos + v_des_world * dt;
-        current_cmd_pos(3) = cmd_body_height; 
-        current_cmd_yaw = current_cmd_yaw + des_yaw_rate * dt;
+        % current_cmd_yaw = 0; % shouldn't this remain active rn?? otherwise gets overritten to the actual yaw which could be nonzero!!!!
+
+        contact_cmd = [1; 1; 1; 1]; % all legs in stance phase
+
+    else % in locomotion
+
+        gait_timer = mod(gait_timer + dt, current_gait.T_cycle); % will always produce a gait timer between 0 - T_cycle, also iterates by dt, which could be innacruate given actual run time
+        current_cmd_pos = current_cmd_pos + v_des_world * dt; % assumes dt is correct, could not be
+        current_cmd_pos(3) = cmd_body_height; % overrrites body height to set one in MPC rn, should prob be changed
+        current_cmd_yaw = current_cmd_yaw + des_yaw_rate * dt; % assumes dt is correct, could not be
     end
+
+
     
-    body_pos_cmd = current_cmd_pos;
-    body_vel_cmd = v_des_world;
+    body_pos_cmd = current_cmd_pos; % renames the body pos command from current?
+    body_vel_cmd = v_des_world; % same thing?
     body_rpy_cmd = [0; des_pitch; current_cmd_yaw];  % [roll=0, pitch=joystick, yaw=integrated]
 
     % --- D2. MPC Weight Scheduling Based on FSM State ---
+
     if current_fsm_state == FSM_STAND
         Q = Q_stand;
     else
@@ -274,25 +299,31 @@ while true
     end
 
     % --- E. Gait Scheduler & Trajectory Generation (Paper Methods) ---
+
     yaw = state.rpy(3);
     R_yaw = [cos(yaw), -sin(yaw), 0; sin(yaw), cos(yaw), 0; 0, 0, 1];
     foot_pos_cmd_world = zeros(12, 1);
     foot_vel_cmd_world = zeros(12, 1);
 
     % Trajectory parameters (Hyun et al. 2014)
+
     stance_delta = 0.02;  % m - vertical modulation for stance (Section III-C)
 
     if current_fsm_state == FSM_STAND
+
         % DISABLED LOCK-IN: Always use current foot positions (no locking)
         % This tests if delayed lock-in was causing the pitch issues
         standing_foot_positions = reshape(state.p_gc, [3, 4]);
         foot_pos_cmd_world = reshape(standing_foot_positions, [12, 1]);
+
     else
+
         for i = 1:4
             [contact, swing_phase] = get_gait_schedule(gait_timer, current_gait.T_cycle, current_gait.stance_percent, current_gait.phase_offsets(i));
             contact_cmd(i) = contact;
 
             % Update leg phase timers
+
             if contact ~= prev_contact_state(i)
                 leg_phase_timers(i) = 0;  % Reset timer on state change
                 if contact == 1
@@ -300,11 +331,12 @@ while true
                     touchdown_positions(:, i) = state.p_gc(3*i-2 : 3*i);
                 end
             else
-                leg_phase_timers(i) = leg_phase_timers(i) + dt;
+                leg_phase_timers(i) = leg_phase_timers(i) + dt; % relies on dt
             end
 
             if contact == 1
                 % STANCE: Use equilibrium-point hypothesis (Hyun et al. Section III-C)
+
                 T_stance = current_gait.T_cycle * current_gait.stance_percent;
                 stance_phase = min(leg_phase_timers(i) / T_stance, 1.0);
 
@@ -325,7 +357,7 @@ while true
                                               k_raibert, ...
                                               cmd_body_height, GRAVITY);
 
-                p_target(3) = touchdown_positions(3, i);  % Use previous touchdown height
+                p_target(3) = touchdown_positions(3, i);  % Use previous touchdown height, doesn't work for varying height environment
                 T_swing = current_gait.T_cycle * (1 - current_gait.stance_percent);
 
                 [p_swing, v_swing] = get_swing_trajectory_bezier(...
@@ -341,25 +373,28 @@ while true
     end
 
     % --- F. MPC Solver ---
-    x_current = [state.rpy; state.position; state.omega; state.velocity];
-    x_size = 12; u_size = 12;
-    n_vars = (N_horizon + 1) * (x_size + u_size);
-    x_ref_traj = zeros(x_size, N_horizon + 1);
-    contact_plan = zeros(4, N_horizon + 1);
+
+    x_current = [state.rpy; state.position; state.omega; state.velocity]; % all states for the mpc, current vals
+    x_size = 12; u_size = 12; % 12 states, 12 inputs
+    n_vars = (N_horizon + 1) * (x_size + u_size); % total number of vars
+    x_ref_traj = zeros(x_size, N_horizon + 1); % creates the state reference trajectory array
+    contact_plan = zeros(4, N_horizon + 1); % contact plan along the entire horizon
     
-    for k = 0:N_horizon
+    for k = 0:N_horizon % iterates into the horizion
+
         t_pred = k * dt;
-        ref_pos = body_pos_cmd + body_vel_cmd * t_pred;
-        ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred;
-        x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd];
+        ref_pos = body_pos_cmd + body_vel_cmd * t_pred; % assumes constant body vel command through extrapolation
+        ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred; % assumes constant omeg vel along horizon
+        x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd]; % fills in the reference trajectory
         
-        if current_fsm_state == FSM_STAND
+        if current_fsm_state == FSM_STAND % if in stand, contact plan should be all 4 legs in stance
              contact_plan(:, k+1) = [1;1;1;1];
         else
-             t_future = mod(gait_timer + t_pred, current_gait.T_cycle);
+             t_future = mod(gait_timer + t_pred, current_gait.T_cycle); % relies on dt
+
              for leg = 1:4
                  [c, ~] = get_gait_schedule(t_future, current_gait.T_cycle, current_gait.stance_percent, current_gait.phase_offsets(leg));
-                 contact_plan(leg, k+1) = c;
+                 contact_plan(leg, k+1) = c; % fills out planned contact plan based on gait scheduler
              end
         end
     end
@@ -370,15 +405,33 @@ while true
     A_eq = sparse(n_eq_rows, n_vars); b_eq = sparse(n_eq_rows, 1);
     A_ineq = sparse((N_horizon+1)*20, n_vars); b_ineq = sparse((N_horizon+1)*20, 1);
 
-    x_idx = @(k) (k-1)*x_size + (1:x_size);
-    u_idx = @(k) (N_horizon+1)*x_size + (k-1)*u_size + (1:u_size);
+    x_idx = @(k) (k-1)*x_size + (1:x_size); % functions to find a given x index wrt k
+    u_idx = @(k) (N_horizon+1)*x_size + (k-1)*u_size + (1:u_size); % functions to find a given u idx wrt k
     force_eq_idx = @(k) n_vars + k;  % Row index for total force constraint
     ineq_row = 1;
     
     for k = 1:(N_horizon + 1)
-        H(x_idx(k), x_idx(k)) = Q; H(u_idx(k), u_idx(k)) = R;
+        
+        % ===================== Cost Weights =====================
+        H(x_idx(k), x_idx(k)) = Q;              % State cost (tracking)
+        H(u_idx(k), u_idx(k)) = R;              % Force cost (regularization)
         f_vec(x_idx(k)) = -Q * x_ref_traj(:, k);
-        f_vec(u_idx(k)) = -R * f_nominal;  % Penalize deviation from nominal, not zero
+
+        % Build a CONTACT-AWARE nominal force for this horizon step.
+        % Only stance legs receive non-zero nominal load, and the sum of
+        % their vertical components equals MASS*GRAVITY.
+        f_nominal_k = zeros(12, 1);
+        n_stance_k = sum(contact_plan(:, k));
+        if n_stance_k > 0
+            fz_nominal = MASS * GRAVITY / n_stance_k;
+            for leg = 1:4
+                if contact_plan(leg, k) == 1
+                    f_nominal_k(3*leg) = fz_nominal;
+                end
+            end
+        end
+        % Penalize deviation from this contact-aware nominal, not zero.
+        f_vec(u_idx(k)) = -R * f_nominal_k;
         
         ref_yaw_k = x_ref_traj(3, k); 
         ref_pos_k = x_ref_traj(4:6, k); 
@@ -386,7 +439,7 @@ while true
         p_feet_mat = reshape(foot_pos_cmd_world, [3, 4]); 
         Bk = build_Bk(MASS, I_body_inv, ref_yaw_k, ref_pos_k, p_feet_mat, dt, contact_plan(:, k));
         
-        if k == 1 
+        if k == 1 % if its the first time step in the horizon
              A_eq(x_idx(k), x_idx(k)) = eye(12); A_eq(x_idx(k), u_idx(k)) = -Bk;
              b_eq(x_idx(k)) = Ak * x_current + g_hat_vec;
         else 
@@ -394,7 +447,7 @@ while true
              A_eq(x_idx(k), u_idx(k)) = -Bk; b_eq(x_idx(k)) = g_hat_vec;
         end
         
-        for leg = 1:4
+        for leg = 1:4 % friction constraint stuff maybe??
              idx_leg = u_idx(k); idx_leg = idx_leg(3*leg-2 : 3*leg);
              if contact_plan(leg, k) == 0
                  row_range = ineq_row : ineq_row+4;
@@ -409,6 +462,7 @@ while true
 
         % Total vertical force constraint: sum(f_z) = mg for stance legs
         % This prevents excessive force while allowing redistribution
+        % why does this have to explicitly be established? is it even in the original paper??
         n_stance = sum(contact_plan(:, k));
         if n_stance > 0
             eq_row = force_eq_idx(k);
@@ -421,13 +475,15 @@ while true
             b_eq(eq_row) = MASS * GRAVITY;  % Total vertical force = mg
         end
     end
+
+    % Solve the QP for the MPC plan
     
     options = optimoptions('quadprog', 'Display', 'off', 'Algorithm', 'interior-point-convex');
     [sol, ~, flag] = quadprog(H, f_vec, A_ineq, b_ineq, A_eq, b_eq, [], [], [], options);
     
-    if flag == 1
+    if flag == 1 % if success, use the reaction forces from the solved QP
         reaction_force_cmd = sol(u_idx(1));
-    else
+    else % if no good, fallback on trivial solution for standing
         reaction_force_cmd = zeros(12,1);
         reaction_force_cmd([3,6,9,12]) = MASS*GRAVITY/4;
         fprintf('\n!!! MPC QP FAILED !!! flag=%d %s\n', flag, qp_status_str(flag));
@@ -448,8 +504,7 @@ while true
     
     lc.publish(params.PLAN_CHANNEL, plan_msg);
 
-    elapsed = toc(loop_start_time);
-    if elapsed < dt, pause(dt - elapsed); end
+
     
     % =========================================================================
     % --- STABILITY MONITOR & LOGS ---
@@ -556,7 +611,12 @@ while true
         fprintf('=======================================================\n\n');
     end
 
-    % fprintf('Loop time: %f seconds\n', toc(loop_start)); 
+    
+
+    elapsed = toc(loop_start_time);
+    if elapsed < dt, pause(dt - elapsed); end
+
+    % fprintf('Loop time: %f seconds\n', toc(loop_start_time)); 
 
 end
 

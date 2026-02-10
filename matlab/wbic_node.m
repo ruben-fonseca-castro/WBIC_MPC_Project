@@ -24,7 +24,7 @@ setup_paths(person_select);
 
 params = initialize_controller_state(); % preloads a struct with a bunch of fixed data types and info
 
-[lc, agg_state, agg_joy, agg_plan] = setup_lcm(params); % send the preloaded params into setup_lcm, setups LCM and subscribers/publishers
+[lc, agg_state, agg_joy, agg_plan] = setup_lcm(params); % send the prkpeloaded params into setup_lcm, setups LCM and subscribers/publishers
 
 %% 2. Logging Setup (sets up logs for future reference)
 
@@ -54,6 +54,9 @@ last_save = tic;
 
 disp('Running... (Ctrl+C to stop)');
 
+% --- Initialize MPC timer ---
+time_since_last_mpc = 0;
+
 %% 3. Main Loop
 
 while true
@@ -73,9 +76,21 @@ while true
         continue;
     end
 
+
+    % --- Update MPC Timer ---
+    % Note: Ensure your read_lcm_messages returns a flag 'plan_received' or similar. 
+    % If params.mpc_plan changed, we reset the timer.
+    if new_data.plan_received
+        time_since_last_mpc = 0;
+    else
+        time_since_last_mpc = time_since_last_mpc + params.dt; % Accumulate time
+    end
+
+    dt_mpc_effective = min(time_since_last_mpc, 0.1);
+
     % WBIC Controller Call
 
-    [tau_cmd, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_actual] = run_wbic_controller(state, params);
+    [tau_cmd, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_actual] = run_wbic_controller(state, params, dt_mpc_effective);
 
     % Publish subsequent control command towards the bot
 
