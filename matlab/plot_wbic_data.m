@@ -1,5 +1,6 @@
 %% WBIC Data Plotter
 clc; clear; format compact;
+close all;
 
 %% Load log file
 log_dir = 'logs';

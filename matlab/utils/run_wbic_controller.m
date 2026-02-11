@@ -9,6 +9,11 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
     contact_state = zeros(4,1); % im assuming this stores whether a leg should be contacting the ground or not?
     f_r_final = zeros(12,1);  % Initialize final forces output as zero
     using_mock_plan = false;
+
+    persistent q_j_cmd_accum;
+    if isempty(q_j_cmd_accum)
+        q_j_cmd_accum = state.qj_pos; 
+    end
     
     % Debug Counter
 
@@ -194,8 +199,9 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         end
 
         % Update previous contact state
-
         prev_contact_state = contact_state;
+
+
 
         % Use trajectories from MPC (already generated with Bézier/stance modulation)
 
@@ -305,10 +311,17 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % Priority weights: higher weight = higher priority
         % Stance gets very high weight (almost hard constraint)
         % Orientation > Position > Swing
-        w_stance = 10000;   % Very high priority for stance constraints
-        w_orientation = 2000;
-        w_position = 2500;
-        w_swing = 10000;
+        % w_stance = 10000;   % Very high priority for stance constraints
+        % w_orientation = 2000;
+        % w_position = 2000;
+        % w_swing = 1000;
+
+        % Gemini recommended weights
+        w_stance = 2000;      % Relax this slightly
+        w_swing  = 5000;      % Prioritize SWING tracking over perfect stance clamping
+        w_orientation = 1200;
+        w_position = 500;
+
         
         % Build diagonal weight matrix
         n_stance = size(J_stance, 1);
@@ -330,23 +343,130 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         
 
-        % Joint Integration
+        % % Joint Integration, the og one
 
-        % !!!Is this how integration works??? shouldnt it include the commanded accel for positional command too?? (1/2*a*t^2)
+        % dt_wbic = params.dt; % uses the dt from the params struct, which is 0.001
+        % q_j_acc = q_ddot_cmd(7:18); % extracts the joint acclerations from the mega accleration command
+        % % q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic; % commanded vel is current vel + accel * dt
+        % % q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic; % commanded position is current pos + commanded vel * dt
 
-        dt_wbic = params.dt; % uses the dt from the params struct, which is 0.001
-        q_j_acc = q_ddot_cmd(7:18); % extracts the joint acclerations from the mega accleration command
-        % q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic; % commanded vel is current vel + accel * dt
-        % q_j_cmd = state.qj_pos + q_j_vel_cmd * dt_wbic; % commanded position is current pos + commanded vel * dt
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
+        % q_j_cmd     = state.qj_pos + state.qj_vel * dt_wbic + 0.5 * q_j_acc * dt_wbic^2;
 
-        q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
-        q_j_cmd     = state.qj_pos + state.qj_vel * dt_wbic + 0.5 * q_j_acc * dt_wbic^2;
+
+
+
+        % --- Joint Integration (REPLACED) ---
+
+        q_j_acc = q_ddot_cmd(7:18);
+
+        % Integrate the COMMANDED velocity, not the STATE velocity.
+        % This allows the command to "pull ahead" of the robot if the robot lags.
+        % Note: You usually want a decay or sync term to prevent drift if motors saturate.
+        alpha = 0.1; % Blend factor (0.1 = mostly integrate command, but pull slightly to reality)
+
+        % Ideally: q_next = q_prev + q_vel_cmd * dt + 0.5 * acc * dt^2
+        % But since we don't have q_vel_cmd state here, we update:
+
+        q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt; % This is still just a 1-step prediction
+
+        % BETTER: Use the Task Error to drive the position command directly
+        % For swing legs, map Cartesian Desired Pos -> Joint Desired Pos (Analytical IK is best here)
+        % For now, we can try simply NOT resetting the base to 'state.qj_pos' fully.
+
+        % Simple accumulation (Allow error to build up so Kp kicks in):
+        q_j_cmd_accum = q_j_cmd_accum + state.qj_vel * params.dt + 0.5 * q_j_acc * params.dt^2;
+
+        % Correction to prevent infinite drift (optional)
+        q_j_cmd_accum = q_j_cmd_accum + 0.05 * (state.qj_pos - q_j_cmd_accum); 
+
+        q_j_cmd = q_j_cmd_accum;
+        q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt;
+
+
+
+
+        % %% --- 3b. Joint Integration (CORRECTED) --- another version
+        % % We must integrate ACCELERATION -> VELOCITY -> POSITION
+        % % Do NOT reset to 'state.qj_vel' or 'state.qj_pos' every step, 
+        % % or you kill the motor stiffness.
+
+        % persistent q_j_vel_cmd_accum;
+        
+        % % Initialization (First run only)
+        % if isempty(q_j_vel_cmd_accum)
+        %     q_j_vel_cmd_accum = zeros(12, 1); 
+        % end
+        
+        % % If we just switched modes or startup, maybe sync velocity (optional safety)
+        % % But generally, trust the integrator.
+
+        % q_j_acc = q_ddot_cmd(7:18); % Extract joint accelerations
+        % dt = params.dt;
+
+        % % 1. Integrate Velocity: v_cmd = v_old + a_cmd * dt
+        % q_j_vel_cmd_accum = q_j_vel_cmd_accum + q_j_acc * dt;
+        
+        % % Decay/Saturation for safety (prevent windup if bot falls)
+        % % Slowly bleed velocity to zero if it gets crazy high, but don't fight motion
+        % q_j_vel_cmd_accum = q_j_vel_cmd_accum * 0.999; 
+
+        % % 2. Integrate Position: p_cmd = p_old + v_cmd * dt
+        % % q_j_cmd_accum was initialized at top of file
+        % q_j_cmd_accum = q_j_cmd_accum + q_j_vel_cmd_accum * dt;
+
+        % % 3. Set Final Output Variables
+        % q_j_vel_cmd = q_j_vel_cmd_accum;
+        % q_j_cmd = q_j_cmd_accum;
+
+        % % [CRITICAL]: Remove the "leak" to state.qj_pos. 
+        % % If you add + 0.05 * (state.qj_pos - q_j_cmd), you disable the Kp gain.
+        % % Only sync if error is MASSIVE (safety reset), otherwise trust command.
+        % if max(abs(state.qj_pos - q_j_cmd)) > 0.5 % ~30 degrees error
+        %      % Emergency sync if we are totally desynced
+        %      q_j_cmd_accum = state.qj_pos;
+        %      q_j_vel_cmd_accum = state.qj_vel;
+        % end
+
+
+
+
+        % %% --- 3b. Stabilized Joint Integration ---
+        % persistent q_j_vel_cmd_accum;
+        % if isempty(q_j_vel_cmd_accum), q_j_vel_cmd_accum = state.qj_vel; end
+        
+        % dt = params.dt;
+        % q_j_acc = q_ddot_cmd(7:18);
+
+        % % 1. Velocity Integration with High Damping
+        % % We blend the integrated command with the actual measured velocity 
+        % % to prevent the 'velocity' command from running away.
+        % vel_alpha = 0.1; % 10% Trust reality, 90% Trust command
+        % q_j_vel_cmd_accum = (1 - vel_alpha) * (q_j_vel_cmd_accum + q_j_acc * dt) + ...
+        %                     (vel_alpha) * state.qj_vel;
+
+        % % 2. Position Integration with "Leaky" Spring
+        % % This is the key: we allow q_j_cmd to be different from state.qj_pos,
+        % % but we 'pull' it toward reality just enough to stop oscillations.
+        % pos_alpha = 0.05; 
+        % q_j_cmd_accum = q_j_cmd_accum + q_j_vel_cmd_accum * dt;
+        
+        % % The "Tether": Prevents the command from oscillating away from the robot
+        % q_j_cmd_accum = q_j_cmd_accum + pos_alpha * (state.qj_pos - q_j_cmd_accum);
+
+        % q_j_vel_cmd = q_j_vel_cmd_accum;
+        % q_j_cmd = q_j_cmd_accum;
+
+
+
+
+
 
 
         %% --- 4. QP SOLVER FOR WBIC ---
 
         n_vars = 18; % 12 joints, 6 body dof
-        Q1 = 100 * eye(12); Q2 = 10 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
+        Q1 = 2 * eye(12); Q2 = 950 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
         % ^ rn, reaction force tracking is prioritized over floating base accel tracking
         H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1); % buils the quadratic cost, multiplies by 2, sets linear cost to 0
 
@@ -364,7 +484,17 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             if contact_state(i) == 0
                 f_idx_start = 6 + (i-1)*3 + 1;
                 A_sub = zeros(3, 18); A_sub(1:3, f_idx_start:f_idx_start+2) = eye(3);
-                A_swing_const = [A_swing_const; A_sub]; b_swing_const = [b_swing_const; 0; 0; 0];
+                A_swing_const = [A_swing_const; A_sub]; 
+
+
+                % b_swing_const = [b_swing_const; 0; 0; 0];
+
+                % Calculate the indices for this leg
+                idx_leg = (i-1)*3 + 1 : (i-1)*3 + 3;
+
+                % This says: "The change must oppose the plan so the sum is zero."
+                % delta_f = -f_mpc  ==>  f_final = f_mpc + (-f_mpc) = 0
+                b_swing_const = [b_swing_const; -f_r_mpc(idx_leg)];
             end
         end
 

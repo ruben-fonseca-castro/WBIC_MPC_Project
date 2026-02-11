@@ -42,7 +42,7 @@ gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR togethe
 % Lateral sequence: FR -> RR -> FL -> RL (each 25% offset)
 % With 80% stance, more overlap between legs for stability
 gait_walk = struct();
-gait_walk.T_cycle = 2.0;           % Fixed cycle for stability, I should modify and see how it affects
+gait_walk.T_cycle = 1.5;           % Fixed cycle for stability, I should modify and see how it affects
 gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
 gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
 
@@ -87,8 +87,8 @@ Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
                3, 3, 5]);           % vx, vy, vz
 
 % Force weights - allow asymmetric forces for orientation control, is this correct??
-R_leg_xy = 1e-5;  % Small penalty on lateral forces
-R_leg_z = 1e-6;   % Very small to allow force redistribution for balance
+R_leg_xy = 1e-6;  % Small penalty on lateral forces
+R_leg_z = 1e-7;   % Very small to allow force redistribution for balance
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
 %% =================================================================
 
@@ -175,8 +175,8 @@ while true
     if ~is_initialized % if not initialized
 
         current_cmd_pos = state.position; % current commanded position is the actual REAL one?? why?
-        current_cmd_pos(3) = cmd_body_height; % overrites the commanded pos heieght to be the set one
-        current_cmd_yaw = state.rpy(3); % sets current commanded yaw to the ACTUAL REAL yaw?? seesms sensitive to noise?? deviations??
+        current_cmd_pos(3) = cmd_body_height; % overrites the commanded pos height to be the set one
+        current_cmd_yaw = state.rpy(3); % sets current commanded yaw to the ACTUAL REAL yaw
         foot_pos_start = reshape(state.p_gc, [3, 4]); % set foot pos start to current ground contact point 
         touchdown_positions = foot_pos_start;  % Initialize touchdown positions
         standing_foot_positions = foot_pos_start;  % Fixed positions for standing
@@ -238,6 +238,8 @@ while true
 
             if ~move_req && (time_left < dt*2)
                 current_fsm_state = FSM_STAND;
+                current_cmd_pos = state.position;
+                current_cmd_pos(3) = cmd_body_height;
                 gait_timer = 0.0;
             end
     end
@@ -254,13 +256,10 @@ while true
 
     if current_fsm_state == FSM_STAND % if we are in stand mode
 
-        % current_cmd_pos(1) = state.position(1); %modified this to test
-        % something
-
-        current_cmd_pos(2) = state.position(2); % current commanded position is the state position???? doesn't this make this sensitive to noise/disturbances compared to nominal standing posture?
+        % current_cmd_pos(2) = state.position(2); % current commanded position is the state position???? doesn't this make this sensitive to noise/disturbances compared to nominal standing posture?
         % ^ shouldn't this just be set once when the switchover happens (Loco to stand or starting off in stand), instead of always updating the command on the current measured pos??
+
         current_cmd_pos(3) = cmd_body_height; % overrrites body height to set one in MPC rn, should prob be changed
-        % current_cmd_yaw = state.rpy(3);  % REMOVED: This caused yaw drift by accepting actual as command
 
         % Calculate center of support --------- testing bs
         % feet_x = state.p_gc([1, 4, 7, 10]);
@@ -271,8 +270,6 @@ while true
         % current_cmd_pos(1) = center_x;
         % current_cmd_pos(2) = center_y;
         % current_cmd_pos(3) = cmd_body_height;
-
-        % current_cmd_yaw = 0; % shouldn't this remain active rn?? otherwise gets overritten to the actual yaw which could be nonzero!!!!
 
         contact_cmd = [1; 1; 1; 1]; % all legs in stance phase
 
@@ -383,6 +380,8 @@ while true
     for k = 0:N_horizon % iterates into the horizion
 
         t_pred = k * dt;
+        % body_pos_curr = state.position;
+        % ref_pos = body_pos_curr + body_vel_cmd * t_pred; % from the actual state of the bot
         ref_pos = body_pos_cmd + body_vel_cmd * t_pred; % assumes constant body vel command through extrapolation
         ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred; % assumes constant omeg vel along horizon
         x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd]; % fills in the reference trajectory
@@ -455,7 +454,8 @@ while true
              else
                  cone_mat = [1 0 -MU; -1 0 -MU; 0 1 -MU; 0 -1 -MU; 0 0 -1];
                  row_range = ineq_row : ineq_row+4;
-                 A_ineq(row_range, idx_leg) = cone_mat; b_ineq(row_range) = [0;0;0;0;0];
+                 min_force = 0.0;
+                 A_ineq(row_range, idx_leg) = cone_mat; b_ineq(row_range) = [0;0;0;0;-min_force]; % min req force for stance leg??
              end
              ineq_row = ineq_row + 5;
         end
