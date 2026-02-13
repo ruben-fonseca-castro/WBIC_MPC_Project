@@ -87,8 +87,10 @@ Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
                3, 3, 5]);           % vx, vy, vz
 
 % Force weights - allow asymmetric forces for orientation control, is this correct??
-R_leg_xy = 1e-6;  % Small penalty on lateral forces
-R_leg_z = 1e-7;   % Very small to allow force redistribution for balance
+R_leg_xy = 1e-9;  % Small penalty on lateral forces
+R_leg_z = 1e-10;   % Very small to allow force redistribution for balance
+% R_leg_xy = 1e-6;  % og
+% R_leg_z = 1e-7;   % og
 R = diag(repmat([R_leg_xy, R_leg_xy, R_leg_z], 1, 4));
 %% =================================================================
 
@@ -380,10 +382,38 @@ while true
     for k = 0:N_horizon % iterates into the horizion
 
         t_pred = k * dt;
-        % body_pos_curr = state.position;
-        % ref_pos = body_pos_curr + body_vel_cmd * t_pred; % from the actual state of the bot
-        ref_pos = body_pos_cmd + body_vel_cmd * t_pred; % assumes constant body vel command through extrapolation
-        ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred; % assumes constant omeg vel along horizon
+
+
+        % % apparently this is wrong below:
+        % % body_pos_curr = state.position;
+        % % ref_pos = body_pos_curr + body_vel_cmd * t_pred; % from the actual state of the bot
+        % ref_pos = body_pos_cmd + body_vel_cmd * t_pred; % assumes constant body vel command through extrapolation
+        % ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred; % assumes constant omeg vel along horizon
+
+        % 1. Position Anchoring
+        if current_fsm_state == FSM_LOCOMOTION
+            % Start from ACTUAL position + velocity projection
+            ref_pos = state.position + body_vel_cmd * t_pred;
+            
+            % Keep Z height targeted to commanded height (don't drift Z)
+            ref_pos(3) = cmd_body_height; 
+       else
+            % In Stand, we do want to hold the specific locked point
+            ref_pos = body_pos_cmd + body_vel_cmd * t_pred;
+       end
+
+       % 2. Yaw Anchoring (CRITICAL for turning)
+       % If you don't reset Yaw, the linearization Rz becomes wrong!
+       ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred;
+       if current_fsm_state == FSM_LOCOMOTION
+           % Overwrite the Yaw part to start from current robot Yaw
+           ref_rpy(3) = state.rpy(3) + body_omega_cmd(3) * t_pred;
+       end
+
+
+
+
+
         x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd]; % fills in the reference trajectory
         
         if current_fsm_state == FSM_STAND % if in stand, contact plan should be all 4 legs in stance
@@ -400,7 +430,8 @@ while true
     
     H = sparse(n_vars, n_vars); f_vec = sparse(n_vars, 1);
     % Extra rows for total force constraints (one per timestep)
-    n_eq_rows = n_vars + (N_horizon + 1);
+    % n_eq_rows = n_vars + (N_horizon + 1);
+    n_eq_rows = n_vars; % Remove the extra rows for force constraints
     A_eq = sparse(n_eq_rows, n_vars); b_eq = sparse(n_eq_rows, 1);
     A_ineq = sparse((N_horizon+1)*20, n_vars); b_ineq = sparse((N_horizon+1)*20, 1);
 
@@ -416,21 +447,23 @@ while true
         H(u_idx(k), u_idx(k)) = R;              % Force cost (regularization)
         f_vec(x_idx(k)) = -Q * x_ref_traj(:, k);
 
-        % Build a CONTACT-AWARE nominal force for this horizon step.
-        % Only stance legs receive non-zero nominal load, and the sum of
-        % their vertical components equals MASS*GRAVITY.
-        f_nominal_k = zeros(12, 1);
-        n_stance_k = sum(contact_plan(:, k));
-        if n_stance_k > 0
-            fz_nominal = MASS * GRAVITY / n_stance_k;
-            for leg = 1:4
-                if contact_plan(leg, k) == 1
-                    f_nominal_k(3*leg) = fz_nominal;
-                end
-            end
-        end
-        % Penalize deviation from this contact-aware nominal, not zero.
-        f_vec(u_idx(k)) = -R * f_nominal_k;
+        % % Build a CONTACT-AWARE nominal force for this horizon step.
+        % % Only stance legs receive non-zero nominal load, and the sum of
+        % % their vertical components equals MASS*GRAVITY.
+        % f_nominal_k = zeros(12, 1);
+        % n_stance_k = sum(contact_plan(:, k));
+        % if n_stance_k > 0
+        %     fz_nominal = MASS * GRAVITY / n_stance_k;
+        %     for leg = 1:4
+        %         if contact_plan(leg, k) == 1
+        %             f_nominal_k(3*leg) = fz_nominal;
+        %         end
+        %     end
+        % end
+        % % Penalize deviation from this contact-aware nominal, not zero.
+        % f_vec(u_idx(k)) = -R * f_nominal_k;
+        f_vec(u_idx(k)) = zeros(12, 1);
+
         
         ref_yaw_k = x_ref_traj(3, k); 
         ref_pos_k = x_ref_traj(4:6, k); 
@@ -460,20 +493,21 @@ while true
              ineq_row = ineq_row + 5;
         end
 
-        % Total vertical force constraint: sum(f_z) = mg for stance legs
-        % This prevents excessive force while allowing redistribution
-        % why does this have to explicitly be established? is it even in the original paper??
-        n_stance = sum(contact_plan(:, k));
-        if n_stance > 0
-            eq_row = force_eq_idx(k);
-            for leg = 1:4
-                if contact_plan(leg, k) == 1
-                    fz_idx = u_idx(k); fz_idx = fz_idx(3*leg);  % z-component of leg force
-                    A_eq(eq_row, fz_idx) = 1;
-                end
-            end
-            b_eq(eq_row) = MASS * GRAVITY;  % Total vertical force = mg
-        end
+        % % Total vertical force constraint: sum(f_z) = mg for stance legs
+        % % This prevents excessive force while allowing redistribution
+        % % why does this have to explicitly be established? is it even in the original paper??
+        % n_stance = sum(contact_plan(:, k));
+        % if n_stance > 0
+        %     eq_row = force_eq_idx(k);
+        %     for leg = 1:4
+        %         if contact_plan(leg, k) == 1
+        %             fz_idx = u_idx(k); fz_idx = fz_idx(3*leg);  % z-component of leg force
+        %             A_eq(eq_row, fz_idx) = 1;
+        %         end
+        %     end
+        %     b_eq(eq_row) = MASS * GRAVITY;  % Total vertical force = mg
+        % end
+
     end
 
     % Solve the QP for the MPC plan

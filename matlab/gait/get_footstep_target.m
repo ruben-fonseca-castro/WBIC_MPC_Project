@@ -18,7 +18,8 @@ function [p_target] = get_footstep_target(state, v_des, omega_des, p_shoulder, T
 
     %% --- 1. Symmetry Term (Feedforward) ---
     % Use desired velocity for feedforward (more predictable)
-    p_symmetry = (T_stance / 2) * v_des;
+    % p_symmetry = (T_stance / 2) * v_des;
+    p_symmetry = (T_stance / 2) * v_curr;
 
     %% --- 2. Feedback Term (Raibert Heuristic, Eq 14) ---
     % Boost lateral (Y) gain to reduce sway during trotting

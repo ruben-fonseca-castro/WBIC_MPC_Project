@@ -341,6 +341,21 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         q_ddot_cmd = (J_all' * W * J_all + reg * eye(18)) \ (J_all' * W * x_ddot_all); % final joint commanded accelerations
 
+
+        % %% --- 3b. Joint Integration (Paper Style) ---
+        % % Integrate acceleration for ONE step, then add to MEASURED state.
+        % % This prevents drift and "windup".
+
+        % dt = params.dt;
+        % q_j_acc = q_ddot_cmd(7:18);
+
+        % % 1. Velocity Command: Predicted velocity for next step
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * dt;
+
+        % % 2. Position Command: Measured Position + Kinematic Delta
+        % % Paper Eq. 24: q_cmd = q_meas + delta_q
+        % q_j_cmd = state.qj_pos + q_j_vel_cmd * dt;
+
         
 
         % % Joint Integration, the og one
@@ -466,7 +481,8 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         %% --- 4. QP SOLVER FOR WBIC ---
 
         n_vars = 18; % 12 joints, 6 body dof
-        Q1 = 2 * eye(12); Q2 = 950 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
+        % Q1 = 2 * eye(12); Q2 = 950 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
+        Q1 = 1 * eye(12); Q2 = 0.1 * eye(6); % quadratic costs, Q1 for reaction forces on each leg, xyz, Q2 for floating base acceleration
         % ^ rn, reaction force tracking is prioritized over floating base accel tracking
         H_qp = 2 * blkdiag(Q2, Q1); f_qp = zeros(n_vars, 1); % buils the quadratic cost, multiplies by 2, sets linear cost to 0
 
