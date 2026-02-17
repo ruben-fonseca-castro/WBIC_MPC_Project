@@ -34,7 +34,7 @@ p_shoulders_body = [ LENGTH_X, -WIDTH_Y, 0; ...
 
 % TROT GAIT: 2 diagonal legs in contact, fast but less stable
 gait_trot = struct();
-gait_trot.T_cycle = 1.0;
+gait_trot.T_cycle = 0.30;
 gait_trot.stance_percent = 0.55;
 gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR together
 
@@ -46,19 +46,19 @@ gait_walk.T_cycle = 1.5;           % Fixed cycle for stability, I should modify 
 gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
 gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
 
-current_gait = gait_walk;  % Full walk gait - all 4 legs take turns
+current_gait = gait_trot;  % Full walk gait - all 4 legs take turns
 
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
-swing_height = 0.05;  % 4cm
-cmd_body_height = 0.35;  % should probably match the height set in WBIC, or should be passed to it?? MPC -> WBIC HEIGHT
+swing_height = 0.06;  % 4cm
+cmd_body_height = 0.3;  % should probably match the height set in WBIC, or should be passed to it?? MPC -> WBIC HEIGHT
 
 %% ==================== VELOCITY COMMAND (TUNE HERE) ====================
 
-USE_JOYSTICK = false; % Set USE_JOYSTICK = false to command velocity directly without joystick
+USE_JOYSTICK = true; % Set USE_JOYSTICK = false to command velocity directly without joystick
 
 % false joystick setpoints
-CMD_VEL_X = 0.04;   % [m/s] Forward velocity (+ = forward)
+CMD_VEL_X = 0.3;   % [m/s] Forward velocity (+ = forward)
 CMD_VEL_Y = 0.0;    % [m/s] Lateral velocity (+ = left)
 CMD_YAW_RATE = 0.0; % [rad/s] Yaw rate (+ = CCW)
 
@@ -213,11 +213,14 @@ while true
 
     if USE_JOYSTICK
         % Joystick control: forward = walk, release = stand
-        move_req = (joy.left_stick_y < -0.1);
+        move_req = (joy.left_stick_y < -0.1) || (abs(joy.left_stick_x) > 0.1) || (abs(joy.right_stick_x) > 0.1);
         v_des_body = [0; 0; 0];
         des_yaw_rate = 0;
         if move_req
-            v_des_body = [0.15; 0; 0];
+            % v_des_body = [0.15; 0; 0];
+            v_des_body = [-joy.left_stick_y/2;-joy.right_stick_x/2;0];
+            des_yaw_rate = -joy.left_stick_x;
+
         end
     else
         % Direct velocity command (no joystick needed)
@@ -233,6 +236,7 @@ while true
         case FSM_STAND
 
             if move_req, current_fsm_state = FSM_LOCOMOTION; end % changes to locomotion if movement is required
+                
 
         case FSM_LOCOMOTION % if movement no longer required, and time left in gait is less than 2*dt, go back to stand, is this logic robust??
 
@@ -278,7 +282,8 @@ while true
     else % in locomotion
 
         gait_timer = mod(gait_timer + dt, current_gait.T_cycle); % will always produce a gait timer between 0 - T_cycle, also iterates by dt, which could be innacruate given actual run time
-        current_cmd_pos = current_cmd_pos + v_des_world * dt; % assumes dt is correct, could not be
+        % current_cmd_pos = current_cmd_pos + v_des_world * dt; % assumes dt is correct, could not be
+        current_cmd_pos(1:2) = state.position(1:2) + v_des_world(1:2) * dt;
         current_cmd_pos(3) = cmd_body_height; % overrrites body height to set one in MPC rn, should prob be changed
         current_cmd_yaw = current_cmd_yaw + des_yaw_rate * dt; % assumes dt is correct, could not be
     end
@@ -487,7 +492,7 @@ while true
              else
                  cone_mat = [1 0 -MU; -1 0 -MU; 0 1 -MU; 0 -1 -MU; 0 0 -1];
                  row_range = ineq_row : ineq_row+4;
-                 min_force = 0.0;
+                 min_force = 8.0;
                  A_ineq(row_range, idx_leg) = cone_mat; b_ineq(row_range) = [0;0;0;0;-min_force]; % min req force for stance leg??
              end
              ineq_row = ineq_row + 5;

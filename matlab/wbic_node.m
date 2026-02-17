@@ -57,6 +57,12 @@ disp('Running... (Ctrl+C to stop)');
 % --- Initialize MPC timer ---
 time_since_last_mpc = 0;
 
+
+% --- Initialize variables BEFORE the loop ---
+last_foot_vel_cmd = zeros(12, 1);
+mpc_dt_estimate = 0.025; % Default to 40Hz if first frame
+params.foot_acc_cmd = zeros(12, 1); % Initialize the field
+
 %% 3. Main Loop
 
 while true
@@ -77,14 +83,38 @@ while true
     end
 
 
-    % --- Update MPC Timer ---
-    % Note: Ensure your read_lcm_messages returns a flag 'plan_received' or similar. 
-    % If params.mpc_plan changed, we reset the timer.
+    % % --- Update MPC Timer ---
+    % % Note: Ensure your read_lcm_messages returns a flag 'plan_received' or similar. 
+    % % If params.mpc_plan changed, we reset the timer.
+    % if new_data.plan_received
+    %     time_since_last_mpc = 0;
+    % else
+    %     time_since_last_mpc = time_since_last_mpc + params.dt; % Accumulate time
+    % end
+
+    % --- [NEW] Calculate Feedforward Acceleration from MPC Plan ---
     if new_data.plan_received
-        time_since_last_mpc = 0;
+        % Estimate time since last update (avoid div by zero)
+        if time_since_last_mpc > 0.001
+            mpc_dt_estimate = time_since_last_mpc;
+        end
+        
+        % Finite Difference: (Vel_New - Vel_Old) / dt
+        % This recovers the average acceleration required to bridge the two velocity steps.
+        vel_diff = params.mpc_plan.foot_vel_cmd - last_foot_vel_cmd;
+        params.foot_acc_cmd = vel_diff / mpc_dt_estimate;
+        
+        % Update memory
+        last_foot_vel_cmd = params.mpc_plan.foot_vel_cmd;
+        time_since_last_mpc = 0; % Reset timer
     else
-        time_since_last_mpc = time_since_last_mpc + params.dt; % Accumulate time
+        time_since_last_mpc = time_since_last_mpc + params.dt;
     end
+
+
+
+
+
 
     dt_mpc_effective = min(time_since_last_mpc, 0.1);
 

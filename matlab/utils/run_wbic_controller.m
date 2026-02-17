@@ -61,7 +61,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
             % Target: Centered over feet at specific height
             
-            height = 0.35; %global frame, arbitrary, this does respond to this, so we good
+            height = 0.3; %global frame, arbitrary, this does respond to this, so we good
 
             mock_plan.body_pos_cmd = [center_x; center_y; height]; % mock mpc global body xyz target coords
             mock_plan.body_rpy_cmd = [0;0;0]; % body roll pitch yaw [radians] in global frame target, all 0 for mock
@@ -168,38 +168,104 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % end
 
 
+        %% --- 2a. Smooth MPC Trajectories (2nd Order Dead Reckoning) ---
+        % Project prediction forward using Velocity AND Acceleration.
+        
+        if dt_mpc > 0 && ~using_mock_plan && isstruct(params.mpc_plan)
+            % Body prediction (Keep existing)
+            params.mpc_plan.body_pos_cmd = params.mpc_plan.body_pos_cmd + ...
+                                        params.mpc_plan.body_vel_cmd * dt_mpc;
+            params.mpc_plan.body_rpy_cmd = params.mpc_plan.body_rpy_cmd + ...
+                                        params.mpc_plan.body_omega_cmd * dt_mpc;
+
+            % [FIX] Foot Prediction: Pos = P0 + V0*t + 0.5*a*t^2
+            % This creates a smooth arc instead of a straight line
+            foot_pos = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]);
+            foot_vel = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
+            foot_acc = reshape(params.foot_acc_cmd, [3, 4]); % Calculated in wbic_node
+            
+            foot_pos_updated = foot_pos + foot_vel * dt_mpc + 0.5 * foot_acc * dt_mpc^2;
+            
+            % [FIX] ALSO update velocity: Vel = V0 + a*t
+            % This eliminates the "staircase" velocity seen by the swing controller
+            foot_vel_updated = foot_vel + foot_acc * dt_mpc;
+            
+            params.mpc_plan.foot_pos_cmd = foot_pos_updated(:);
+            params.mpc_plan.foot_vel_cmd = foot_vel_updated(:); % Update the velocity too!
+       end
+
+
 
 
         f_r_mpc = params.mpc_plan.reaction_force; % extract planned reaction force into local
         contact_cmd = params.mpc_plan.contact; % extract contact plan into local
+        contact_state = contact_cmd;
 
         p_gc_curr = reshape(state.p_gc, [3, 4]); % gets current ground contact global position for each leg
 
 
 
 
-        %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
-        % Use actual force feedback (state.foot_force) to detect early touch-down
-        % during swing: if the MPC commands swing but the foot already has measurable
-        % ground contact force, switch to stance for that leg.
+        % %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
+        % % Use actual force feedback (state.foot_force) to detect early touch-down
+        % % during swing: if the MPC commands swing but the foot already has measurable
+        % % ground contact force, switch to stance for that leg.
 
-        force_threshold = 21;  % N - threshold for touch-down detection
-        contact_state = zeros(4, 1);
+        % force_threshold = 21;  % N - threshold for touch-down detection
+        % contact_state = zeros(4, 1);
 
-        for leg = 1:4
-            % Use measured/estimated foot force from robot state (not planned force)
-            foot_force_actual = state.foot_force(leg);
+        % for leg = 1:4
+        %     % Use measured/estimated foot force from robot state (not planned force)
+        %     foot_force_actual = state.foot_force(leg);
 
-            % Event-based override: MPC says swing but actual force above threshold -> early touch-down, ideally this shouldn't happen often right?
-            if contact_cmd(leg) == 0 && foot_force_actual > force_threshold
-                contact_state(leg) = 1;  % Early touch-down detected
-            else
-                contact_state(leg) = contact_cmd(leg);
-            end
-        end
+        %     % Event-based override: MPC says swing but actual force above threshold -> early touch-down, ideally this shouldn't happen often right?
+        %     if contact_cmd(leg) == 0 && foot_force_actual > force_threshold
+        %         contact_state(leg) = 1;  % Early touch-down detected
+        %     else
+        %         contact_state(leg) = contact_cmd(leg);
+        %     end
+        % end
 
-        % Update previous contact state
-        prev_contact_state = contact_state;
+
+        % %% --- 2b. Event-Based Contact Detection (FIXED) ---
+        % force_threshold = 20;  % N
+        % contact_state = zeros(4, 1);
+        
+        % % Extract planned foot velocity (Z-component)
+        % v_foot_plan = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
+
+        % for leg = 1:4
+        %     foot_force_actual = state.foot_force(leg);
+            
+        %     % Check if MPC wants us to lift (Velocity Z > 0.1 m/s)
+        %     is_lifting = v_foot_plan(3, leg) > 0.1;
+
+        %     % LOGIC: 
+        %     % 1. If MPC says Swing (0)...
+        %     % 2. AND we are NOT trying to lift off (is_lifting == false)...
+        %     % 3. AND force is high...
+        %     % THEN -> It is an early landing.
+            
+        %     if contact_cmd(leg) == 0 && foot_force_actual > force_threshold && ~is_lifting
+        %          contact_state(leg) = 1; 
+        %     else
+        %          contact_state(leg) = contact_cmd(leg);
+        %     end
+        % end
+
+
+
+
+
+
+
+
+
+
+
+
+        % % Update previous contact state
+        % prev_contact_state = contact_state;
 
 
 
@@ -282,17 +348,56 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         % --- TASK 3: Swing Foot ---
 
-        J_swing = []; x_ddot_3 = []; % initialize variables to fill in later
-        for i = 1:4 % each leg
-            if contact_state(i) == 0 % if swinging
-                J_swing = [J_swing; J_c(3*i-2 : 3*i, :)]; % append contact jacobian splice for specific leg
-                idx = 3*i-2 : 3*i; % shoudln't this go before the above line to simplify calcs?
-                p_err = p_gc_des(:, i) - p_gc_curr(:, i); % positional error of "ground contact" for each leg, is this wokring as intended?
-                v_err = v_gc_des(:, i) - v_gc_act(idx); % vel error of ground contact leg, again, is this how it shoul be done?
-                acc_swing = kp_foot * p_err + kd_foot * v_err; % PD controller for acc of swinging, seems kinda TSC'y
-                x_ddot_3 = [x_ddot_3; acc_swing]; % append the acceleration
+        
+        % [FIX] Use the smooth acceleration we calculated in wbic_node
+        a_gc_des = reshape(params.foot_acc_cmd, [3, 4]);
+
+        J_swing = []; x_ddot_3 = []; 
+        for i = 1:4 
+            if contact_state(i) == 0 % Swing Leg
+                J_swing = [J_swing; J_c(3*i-2 : 3*i, :)]; 
+                idx = 3*i-2 : 3*i; 
+                
+                p_err = p_gc_des(:, i) - p_gc_curr(:, i); 
+                v_err = v_gc_des(:, i) - v_gc_act(idx); 
+                
+                % [FIX] Feedforward Acceleration
+                % Now a_gc_des is non-zero (approx 10-15 m/s^2), which provides 
+                % the inertial "kick" needed to lift the leg without lag.
+                acc_swing = kp_foot * p_err + kd_foot * v_err + a_gc_des(:, i); 
+                
+                x_ddot_3 = [x_ddot_3; acc_swing]; 
             end
         end
+
+
+        % % [NEW] Persistent variable to calculate feedforward acceleration
+        % persistent v_gc_des_prev;
+        % if isempty(v_gc_des_prev), v_gc_des_prev = zeros(3,4); end
+
+        % % Calculate Acceleration: (v_next - v_prev) / dt
+        % a_gc_des = (v_gc_des - v_gc_des_prev) / params.dt;
+        % v_gc_des_prev = v_gc_des; % Update for next loop
+
+        % J_swing = []; x_ddot_3 = []; % initialize variables to fill in later
+        % for i = 1:4 % each leg
+        %     if contact_state(i) == 0 % if swinging
+        %         J_swing = [J_swing; J_c(3*i-2 : 3*i, :)]; % append contact jacobian splice for specific leg
+        %         idx = 3*i-2 : 3*i; % shoudln't this go before the above line to simplify calcs?
+        %         p_err = p_gc_des(:, i) - p_gc_curr(:, i); % positional error of "ground contact" for each leg, is this wokring as intended?
+        %         v_err = v_gc_des(:, i) - v_gc_act(idx); % vel error of ground contact leg, again, is this how it shoul be done?
+
+        %         % %the old method
+        %         % acc_swing = kp_foot * p_err + kd_foot * v_err; % PD controller for acc of swinging, seems kinda TSC'y
+
+        %         % [FIX] Add Feedforward Acceleration (a_gc_des)
+        %         % Now the leg 'knows' it needs to accelerate, even with 0 error.
+        %         acc_swing = kp_foot * p_err + kd_foot * v_err + a_gc_des(:, i);
+
+
+        %         x_ddot_3 = [x_ddot_3; acc_swing]; % append the acceleration
+        %     end
+        % end
         
         if isempty(J_swing) % if all legs are on the ground
             J_swing = zeros(0, 18);  % Empty matrix if no swing legs
@@ -317,10 +422,15 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         % w_swing = 1000;
 
         % Gemini recommended weights
-        w_stance = 2000;      % Relax this slightly
-        w_swing  = 5000;      % Prioritize SWING tracking over perfect stance clamping
-        w_orientation = 1200;
-        w_position = 500;
+        % w_stance = 2000;      % Relax this slightly
+        % w_swing  = 5000;      % Prioritize SWING tracking over perfect stance clamping
+        % w_orientation = 1200;
+        % w_position = 500;
+
+        w_stance = 10000;
+        w_orientation = 2000;
+        w_position = 1500;
+        w_swing = 5000;      % Let the IK handle the swing tracking!
 
         
         % Build diagonal weight matrix
@@ -371,32 +481,32 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
 
 
-        % --- Joint Integration (REPLACED) ---
+        % % --- Joint Integration (REPLACED) ---
 
-        q_j_acc = q_ddot_cmd(7:18);
+        % q_j_acc = q_ddot_cmd(7:18);
 
-        % Integrate the COMMANDED velocity, not the STATE velocity.
-        % This allows the command to "pull ahead" of the robot if the robot lags.
-        % Note: You usually want a decay or sync term to prevent drift if motors saturate.
-        alpha = 0.1; % Blend factor (0.1 = mostly integrate command, but pull slightly to reality)
+        % % Integrate the COMMANDED velocity, not the STATE velocity.
+        % % This allows the command to "pull ahead" of the robot if the robot lags.
+        % % Note: You usually want a decay or sync term to prevent drift if motors saturate.
+        % alpha = 0.1; % Blend factor (0.1 = mostly integrate command, but pull slightly to reality)
 
-        % Ideally: q_next = q_prev + q_vel_cmd * dt + 0.5 * acc * dt^2
-        % But since we don't have q_vel_cmd state here, we update:
+        % % Ideally: q_next = q_prev + q_vel_cmd * dt + 0.5 * acc * dt^2
+        % % But since we don't have q_vel_cmd state here, we update:
 
-        q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt; % This is still just a 1-step prediction
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt; % This is still just a 1-step prediction
 
-        % BETTER: Use the Task Error to drive the position command directly
-        % For swing legs, map Cartesian Desired Pos -> Joint Desired Pos (Analytical IK is best here)
-        % For now, we can try simply NOT resetting the base to 'state.qj_pos' fully.
+        % % BETTER: Use the Task Error to drive the position command directly
+        % % For swing legs, map Cartesian Desired Pos -> Joint Desired Pos (Analytical IK is best here)
+        % % For now, we can try simply NOT resetting the base to 'state.qj_pos' fully.
 
-        % Simple accumulation (Allow error to build up so Kp kicks in):
-        q_j_cmd_accum = q_j_cmd_accum + state.qj_vel * params.dt + 0.5 * q_j_acc * params.dt^2;
+        % % Simple accumulation (Allow error to build up so Kp kicks in):
+        % q_j_cmd_accum = q_j_cmd_accum + state.qj_vel * params.dt + 0.5 * q_j_acc * params.dt^2;
 
-        % Correction to prevent infinite drift (optional)
-        q_j_cmd_accum = q_j_cmd_accum + 0.05 * (state.qj_pos - q_j_cmd_accum); 
+        % % Correction to prevent infinite drift (optional)
+        % q_j_cmd_accum = q_j_cmd_accum + 0.05 * (state.qj_pos - q_j_cmd_accum); 
 
-        q_j_cmd = q_j_cmd_accum;
-        q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt;
+        % q_j_cmd = q_j_cmd_accum;
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * params.dt;
 
 
 
@@ -471,6 +581,161 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
 
         % q_j_vel_cmd = q_j_vel_cmd_accum;
         % q_j_cmd = q_j_cmd_accum;
+
+
+
+        % %% --- 3b. Hybrid Joint Integration ---
+        % % Stance: Reset to measured (Compliant / Paper Style)
+        % % Swing:  Pure Integration (Stiff Tracking)
+        
+        % dt = params.dt;
+        % q_j_acc = q_ddot_cmd(7:18);
+        
+        % % 1. Velocity Command
+        % q_j_vel_cmd = state.qj_vel + q_j_acc * dt;
+        
+        % % 2. Position Command (Split Logic)
+        % q_j_cmd = zeros(12, 1);
+        
+        % for leg = 1:4
+        %     % Get indices for this leg's 3 joints
+        %     idx = 3*leg-2 : 3*leg;
+            
+        %     if contact_state(leg) == 1
+        %         % STANCE LEG: Paper Eq. 24
+        %         % Reset to measured position to prevent drift fighting the ground
+        %         q_j_cmd(idx) = state.qj_pos(idx) + q_j_vel_cmd(idx) * dt;
+        %     else
+        %         % SWING LEG: Pure Integration
+        %         % Do NOT reset to measured. Trust the integral to build stiffness.
+        %         % Use the accumulator we initialized earlier
+        %         q_j_cmd_accum(idx) = q_j_cmd_accum(idx) + q_j_vel_cmd(idx) * dt;
+        %         q_j_cmd(idx) = q_j_cmd_accum(idx);
+        %     end
+        % end
+        
+        % % Update the accumulator for stance legs too (to keep it synced for the next switch)
+        % % If we don't sync this, the leg will snap when it enters swing phase.
+        % for leg = 1:4
+        %      if contact_state(leg) == 1
+        %          idx = 3*leg-2 : 3*leg;
+        %          q_j_cmd_accum(idx) = state.qj_pos(idx); % Sync accumulator to reality during stance
+        %      end
+        % end
+
+
+
+
+
+        % %% --- 3b. Kinematic IK for Joint Commands (Paper Eq 16 & 17) ---
+        % q_j_cmd = state.qj_pos;
+        % q_j_vel_cmd = state.qj_vel;
+        % dt = params.dt;
+
+        % for leg = 1:4
+        %     j_idx = 3*leg-2 : 3*leg;
+            
+        %     if contact_state(leg) == 1
+        %         % STANCE: Compliant tracking (reset to measured)
+        %         % q_j_cmd(j_idx) = state.qj_pos(j_idx);
+        %         % q_j_vel_cmd(j_idx) = state.qj_vel(j_idx);
+
+        %         % 1. Velocity Command comes from WBIC acceleration (Task 0: Stance = 0 accel)
+        %         q_j_vel_cmd(j_idx) = state.qj_vel(j_idx) + q_ddot_cmd(6 + j_idx) * dt;
+                 
+        %         % 2. Position Command = Measured + Velocity * dt
+        %         q_j_cmd(j_idx) = state.qj_pos(j_idx) + q_j_vel_cmd(j_idx) * dt;
+        %     else
+        %         % SWING: Direct Inverse Kinematics
+        %         % Extract the 3x3 Jacobian specific to this leg's joints
+        %         J_leg = J_c(j_idx, 6 + j_idx);
+                
+        %         % Cartesian errors
+        %         p_err = p_gc_des(:, leg) - p_gc_curr(:, leg);
+        %         v_err = v_gc_des(:, leg);
+                
+        %         % Map Cartesian error directly to joint error (Damped pseudo-inverse)
+        %         delta_q = (J_leg' * J_leg + 1e-4 * eye(3)) \ (J_leg' * p_err);
+                
+        %         % Set commands so the Motor PD loop sees the FULL error
+        %         q_j_cmd(j_idx) = state.qj_pos(j_idx) + delta_q;
+                
+        %         % Velocity IK
+        %         q_j_vel_cmd(j_idx) = (J_leg' * J_leg + 1e-4 * eye(3)) \ (J_leg' * v_err);
+        %     end
+        % end
+
+
+        % %% --- 3b. Robust Integration (The "Rigid Stance" Fix) ---
+        % dt = params.dt; % Fixed 0.001
+        
+        % q_j_cmd = zeros(12, 1);
+        % q_j_vel_cmd = zeros(12, 1);
+
+        % for leg = 1:4
+        %     idx = 3*leg-2 : 3*leg;
+            
+        %     % 1. Calculate Velocity Command for ALL legs
+        %     %    (Stance legs have v~0, Swing legs have v~High)
+        %     q_j_acc = q_ddot_cmd(6 + idx); % Extract joint accel
+        %     q_j_vel_cmd(idx) = state.qj_vel(idx) + q_j_acc * dt;
+            
+        %     if contact_state(leg) == 1
+        %         % STANCE: Integrate velocity (Do NOT reset to measured)
+        %         % This keeps the "virtual spring" loaded. If the robot sinks,
+        %         % q_cmd stays high, creating a large error -> High PD Torque.
+                
+        %         % Use the accumulator we initialized at the top of the function
+        %         q_j_cmd_accum(idx) = q_j_cmd_accum(idx) + q_j_vel_cmd(idx) * dt;
+                
+        %         % Safety: Blend slightly to reality to prevent infinite drift (0.1% leak)
+        %         q_j_cmd_accum(idx) = 0.999 * q_j_cmd_accum(idx) + 0.001 * state.qj_pos(idx);
+                
+        %         q_j_cmd(idx) = q_j_cmd_accum(idx);
+                
+        %     else
+        %         % SWING: Kinematic IK (Your existing working code)
+        %         % ... [Insert your existing IK logic here] ...
+                
+        %         % Update the accumulator so it's ready for the next landing
+        %         q_j_cmd_accum(idx) = q_j_cmd(idx);
+        %     end
+        % end
+
+
+        %% --- 3b. Joint Integration (Split Logic) ---
+        dt_wbic = params.dt;
+        q_j_acc = q_ddot_cmd(7:18); % Extract joint accelerations from WLS
+        
+        % 1. Calculate Velocity Command for ALL legs
+        q_j_vel_cmd = state.qj_vel + q_j_acc * dt_wbic;
+        
+        % 2. Position Command (The Critical Fix)
+        q_j_cmd = zeros(12, 1);
+        
+        for leg = 1:4
+            idx = 3*leg-2 : 3*leg;
+            
+            if contact_state(leg) == 1
+                % STANCE: Reset to Measured (Compliant)
+                % This prevents the robot from trying to push through the floor
+                q_j_cmd(idx) = state.qj_pos(idx) + q_j_vel_cmd(idx) * dt_wbic;
+                
+                % Sync the accumulator so it's ready when we switch to swing
+                q_j_cmd_accum(idx) = state.qj_pos(idx); 
+            else
+                % SWING: Pure Integration (Stiff)
+                % Do NOT reset to measured. Let q_cmd_accum pull away from reality.
+                % This builds up the error (q_cmd - q_meas) needed for Kp to generate lift.
+                
+                % Integrate: pos = pos_old + vel * dt + 0.5 * acc * dt^2
+                q_j_cmd_accum(idx) = q_j_cmd_accum(idx) + ...
+                                     q_j_vel_cmd(idx) * dt_wbic + ...
+                                     0.5 * q_j_acc(idx) * dt_wbic^2;
+                
+                q_j_cmd(idx) = q_j_cmd_accum(idx);
+            end
+        end
 
 
 

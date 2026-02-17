@@ -38,11 +38,14 @@ function params = initialize_controller_state()
 
     % what is the python controller? lcm_controller_handler tf is this
 
-    kp = 5.0;  % Gentle feedback gain
-    kd = 0.5;
+    % kp = 5.0;  % Gentle feedback gain
+    % kd = 0.5;
 
-    % kp = 50;  % Gentle feedback gain
-    % kd = 3;
+    kp = 50;  % Gentle feedback gain
+    kd = 1;
+
+    % kp = 200;  % Gentle feedback gain
+    % kd = 1;
 
     params.KP_vec = ones(12, 1) * kp;
     params.KD_vec = ones(12, 1) * kd;
