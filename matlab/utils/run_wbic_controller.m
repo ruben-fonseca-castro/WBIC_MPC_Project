@@ -22,13 +22,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
     wbic_cnt = wbic_cnt + 1;
     do_print = (mod(wbic_cnt, 20) == 0); % Print every 0.5s
 
-    % Persistent state for event-based contact detection
-
-    persistent prev_contact_state; % basically same as static in cpp, holds the values bw function calls
-
-    if isempty(prev_contact_state)
-        prev_contact_state = ones(4, 1);  % Start in stance (1 = contact, 0 = floating)
-    end
 
     try
         %% --- 1. Setup Dynamics ---
@@ -98,8 +91,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             % sets the desired moment (corrective) as a P controller with current state roll and pitch, and always
             % setting yaw to 0. Will only ever have a potential desired moment along roll and pitch directions
 
-            % besides, dog still pitches up a bit, although much less noticeable, barely see wack deviations in the log anymore
-
             desired_moment = -kp_ori * [state.rpy(1); state.rpy(2); 0]; %maybe adjust this?? SS error most likely exist
             
 
@@ -139,33 +130,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             params.mpc_plan = mock_plan; % sets the mpc to the mock plan
         end
 
-        % MPC done, moving into WBIC/Lower Level
-
-
-        % %% --- 2a. Smooth MPC Trajectories (Dead Reckoning) --- I dont think this is helping so disabling
-        % % Project the low-frequency MPC plan forward using velocity commands
-        % % to prevent "staircase" inputs to the high-frequency WBIC.
-        
-        % if dt_mpc > 0 && ~using_mock_plan && isstruct(params.mpc_plan)
-        %     % 1. Body Position Prediction: p_new = p_old + v * dt
-        %     params.mpc_plan.body_pos_cmd = params.mpc_plan.body_pos_cmd + ...
-        %                                 params.mpc_plan.body_vel_cmd * dt_mpc;
-
-        %     % 2. Body Orientation Prediction: R_new approx R_old + (omega x R) * dt
-        %     % Simple Euler integration for small timesteps:
-        %     params.mpc_plan.body_rpy_cmd = params.mpc_plan.body_rpy_cmd + ...
-        %                                 params.mpc_plan.body_omega_cmd * dt_mpc;
-
-        %     % 3. Foot Position Prediction (Crucial for smooth swing)
-        %     % Reshape, update, and reshape back
-        %     foot_pos = reshape(params.mpc_plan.foot_pos_cmd, [3, 4]);
-        %     foot_vel = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
-            
-        %     % Only update feet that are moving (optional check, but vel should be 0 for stance anyway)
-        %     foot_pos_updated = foot_pos + foot_vel * dt_mpc;
-            
-        %     params.mpc_plan.foot_pos_cmd = foot_pos_updated(:);
-        % end
 
 
         %% --- 2a. Smooth MPC Trajectories (2nd Order Dead Reckoning) ---
@@ -195,77 +159,12 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
        end
 
 
-
-
         f_r_mpc = params.mpc_plan.reaction_force; % extract planned reaction force into local
         contact_cmd = params.mpc_plan.contact; % extract contact plan into local
         contact_state = contact_cmd;
 
         p_gc_curr = reshape(state.p_gc, [3, 4]); % gets current ground contact global position for each leg
 
-
-
-
-        % %% --- 2b. Event-Based Contact Detection (Bledt et al. 2018) ---
-        % % Use actual force feedback (state.foot_force) to detect early touch-down
-        % % during swing: if the MPC commands swing but the foot already has measurable
-        % % ground contact force, switch to stance for that leg.
-
-        % force_threshold = 21;  % N - threshold for touch-down detection
-        % contact_state = zeros(4, 1);
-
-        % for leg = 1:4
-        %     % Use measured/estimated foot force from robot state (not planned force)
-        %     foot_force_actual = state.foot_force(leg);
-
-        %     % Event-based override: MPC says swing but actual force above threshold -> early touch-down, ideally this shouldn't happen often right?
-        %     if contact_cmd(leg) == 0 && foot_force_actual > force_threshold
-        %         contact_state(leg) = 1;  % Early touch-down detected
-        %     else
-        %         contact_state(leg) = contact_cmd(leg);
-        %     end
-        % end
-
-
-        % %% --- 2b. Event-Based Contact Detection (FIXED) ---
-        % force_threshold = 20;  % N
-        % contact_state = zeros(4, 1);
-        
-        % % Extract planned foot velocity (Z-component)
-        % v_foot_plan = reshape(params.mpc_plan.foot_vel_cmd, [3, 4]);
-
-        % for leg = 1:4
-        %     foot_force_actual = state.foot_force(leg);
-            
-        %     % Check if MPC wants us to lift (Velocity Z > 0.1 m/s)
-        %     is_lifting = v_foot_plan(3, leg) > 0.1;
-
-        %     % LOGIC: 
-        %     % 1. If MPC says Swing (0)...
-        %     % 2. AND we are NOT trying to lift off (is_lifting == false)...
-        %     % 3. AND force is high...
-        %     % THEN -> It is an early landing.
-            
-        %     if contact_cmd(leg) == 0 && foot_force_actual > force_threshold && ~is_lifting
-        %          contact_state(leg) = 1; 
-        %     else
-        %          contact_state(leg) = contact_cmd(leg);
-        %     end
-        % end
-
-
-
-
-
-
-
-
-
-
-
-
-        % % Update previous contact state
-        % prev_contact_state = contact_state;
 
 
 
@@ -284,6 +183,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         v_gc_act = J_c * q_dot_full; % jacobian transfer from joint space to task space
 
         %% --- 3. WEIGHTED SUM TASK CONTROL ---
+
         % All tasks are combined using a fixed weighted sum approach
         % (replaces null-space projection method)
         % Task priorities: Stance >> Orientation > Position > Swing
@@ -329,7 +229,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         J_1 = [zeros(3,3), eye(3), zeros(3,12)]; % creates a mega jacobian, columns 4-6 deal with orientation so those are active
         rot_err = params.mpc_plan.body_rpy_cmd - state.rpy; % subtracts mpc planned rpy from actual
         omega_err = params.mpc_plan.body_omega_cmd - state.omega; % subtracts planned rot vel from actual rot vel
-        x_ddot_1 = 2 * kp_base * rot_err + 2 * kd_base * omega_err; % wait so, why is this multiying by zero?? no x_ddot influence
+        x_ddot_1 = 2 * kp_base * rot_err + 2 * kd_base * omega_err; 
         
         % Store for debug
         ori_err_deg = rot_err * 180/pi; % converts to degrees
@@ -370,34 +270,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
             end
         end
 
-
-        % % [NEW] Persistent variable to calculate feedforward acceleration
-        % persistent v_gc_des_prev;
-        % if isempty(v_gc_des_prev), v_gc_des_prev = zeros(3,4); end
-
-        % % Calculate Acceleration: (v_next - v_prev) / dt
-        % a_gc_des = (v_gc_des - v_gc_des_prev) / params.dt;
-        % v_gc_des_prev = v_gc_des; % Update for next loop
-
-        % J_swing = []; x_ddot_3 = []; % initialize variables to fill in later
-        % for i = 1:4 % each leg
-        %     if contact_state(i) == 0 % if swinging
-        %         J_swing = [J_swing; J_c(3*i-2 : 3*i, :)]; % append contact jacobian splice for specific leg
-        %         idx = 3*i-2 : 3*i; % shoudln't this go before the above line to simplify calcs?
-        %         p_err = p_gc_des(:, i) - p_gc_curr(:, i); % positional error of "ground contact" for each leg, is this wokring as intended?
-        %         v_err = v_gc_des(:, i) - v_gc_act(idx); % vel error of ground contact leg, again, is this how it shoul be done?
-
-        %         % %the old method
-        %         % acc_swing = kp_foot * p_err + kd_foot * v_err; % PD controller for acc of swinging, seems kinda TSC'y
-
-        %         % [FIX] Add Feedforward Acceleration (a_gc_des)
-        %         % Now the leg 'knows' it needs to accelerate, even with 0 error.
-        %         acc_swing = kp_foot * p_err + kd_foot * v_err + a_gc_des(:, i);
-
-
-        %         x_ddot_3 = [x_ddot_3; acc_swing]; % append the acceleration
-        %     end
-        % end
         
         if isempty(J_swing) % if all legs are on the ground
             J_swing = zeros(0, 18);  % Empty matrix if no swing legs
@@ -414,6 +286,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
         x_ddot_all = [x_ddot_0; x_ddot_1; x_ddot_2; x_ddot_3]; % vert cat all the accelerations
         
         % Priority weights: higher weight = higher priority
+
         % Stance gets very high weight (almost hard constraint)
         % Orientation > Position > Swing
         % w_stance = 10000;   % Very high priority for stance constraints
@@ -444,7 +317,7 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
                   w_position * ones(n_position, 1); ...
                   w_swing * ones(n_swing, 1)]);
         
-        % Solve weighted least squares: min ||W^(1/2) * (J_all * q_ddot - x_ddot_all)||^2, !!why do we used weighted least squares again?
+        % Solve weighted least squares: min ||W^(1/2) * (J_all * q_ddot - x_ddot_all)||^2
         % Using regularization for numerical stability
 
         reg = 1e-6;  % Small regularization term
@@ -736,10 +609,6 @@ function [tau_j, contact_state, params, q_j_cmd, q_j_vel_cmd, f_r_final] = run_w
                 q_j_cmd(idx) = q_j_cmd_accum(idx);
             end
         end
-
-
-
-
 
 
 

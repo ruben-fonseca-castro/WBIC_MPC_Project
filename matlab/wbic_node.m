@@ -82,16 +82,6 @@ while true
         continue;
     end
 
-
-    % % --- Update MPC Timer ---
-    % % Note: Ensure your read_lcm_messages returns a flag 'plan_received' or similar. 
-    % % If params.mpc_plan changed, we reset the timer.
-    % if new_data.plan_received
-    %     time_since_last_mpc = 0;
-    % else
-    %     time_since_last_mpc = time_since_last_mpc + params.dt; % Accumulate time
-    % end
-
     % --- [NEW] Calculate Feedforward Acceleration from MPC Plan ---
     if new_data.plan_received
         % Estimate time since last update (avoid div by zero)
@@ -110,9 +100,6 @@ while true
     else
         time_since_last_mpc = time_since_last_mpc + params.dt;
     end
-
-
-
 
 
 

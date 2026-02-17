@@ -32,21 +32,20 @@ p_shoulders_body = [ LENGTH_X, -WIDTH_Y, 0; ...
                     -LENGTH_X, -WIDTH_Y, 0; ... 
                     -LENGTH_X,  WIDTH_Y, 0]';   
 
-% TROT GAIT: 2 diagonal legs in contact, fast but less stable
+% TROT GAIT: 2 diagonal legs in contact
 gait_trot = struct();
 gait_trot.T_cycle = 0.30;
 gait_trot.stance_percent = 0.55;
 gait_trot.phase_offsets = [0.0, 0.5, 0.5, 0.0];  % FR-RL together, FL-RR together
 
-% WALK GAIT: 3 legs in contact at all times, slower but more stable
+% WALK GAIT: 3 legs in contact at all times
 % Lateral sequence: FR -> RR -> FL -> RL (each 25% offset)
-% With 80% stance, more overlap between legs for stability
 gait_walk = struct();
 gait_walk.T_cycle = 1.5;           % Fixed cycle for stability, I should modify and see how it affects
 gait_walk.stance_percent = 0.80;   % 80% stance = only 20% swing time per leg
 gait_walk.phase_offsets = [0.0, 0.5, 0.25, 0.75];  % Proper 0.25 spacing: FR→RR→FL→RL
 
-current_gait = gait_trot;  % Full walk gait - all 4 legs take turns
+current_gait = gait_trot; % set the gait
 
 % Tuning (paper values)
 k_raibert = 0.03;  % Paper Eq. 14: k = 0.03
@@ -86,7 +85,7 @@ Q_loco = diag([375, 375, 25, ...    % roll, pitch, yaw
                15, 15, 0.5, ...     % wx, wy, wz
                3, 3, 5]);           % vx, vy, vz
 
-% Force weights - allow asymmetric forces for orientation control, is this correct??
+% Force weights - allow asymmetric forces for orientation control
 R_leg_xy = 1e-9;  % Small penalty on lateral forces
 R_leg_z = 1e-10;   % Very small to allow force redistribution for balance
 % R_leg_xy = 1e-6;  % og
@@ -262,20 +261,7 @@ while true
 
     if current_fsm_state == FSM_STAND % if we are in stand mode
 
-        % current_cmd_pos(2) = state.position(2); % current commanded position is the state position???? doesn't this make this sensitive to noise/disturbances compared to nominal standing posture?
-        % ^ shouldn't this just be set once when the switchover happens (Loco to stand or starting off in stand), instead of always updating the command on the current measured pos??
-
         current_cmd_pos(3) = cmd_body_height; % overrrites body height to set one in MPC rn, should prob be changed
-
-        % Calculate center of support --------- testing bs
-        % feet_x = state.p_gc([1, 4, 7, 10]);
-        % feet_y = state.p_gc([2, 5, 8, 11]);
-        % center_x = mean(feet_x);
-        % center_y = mean(feet_y);
-        % 
-        % current_cmd_pos(1) = center_x;
-        % current_cmd_pos(2) = center_y;
-        % current_cmd_pos(3) = cmd_body_height;
 
         contact_cmd = [1; 1; 1; 1]; % all legs in stance phase
 
@@ -385,15 +371,13 @@ while true
     contact_plan = zeros(4, N_horizon + 1); % contact plan along the entire horizon
     
     for k = 0:N_horizon % iterates into the horizion
-
+        
         t_pred = k * dt;
 
 
-        % % apparently this is wrong below:
-        % % body_pos_curr = state.position;
-        % % ref_pos = body_pos_curr + body_vel_cmd * t_pred; % from the actual state of the bot
-        % ref_pos = body_pos_cmd + body_vel_cmd * t_pred; % assumes constant body vel command through extrapolation
-        % ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred; % assumes constant omeg vel along horizon
+        % 2. Yaw Anchoring (CRITICAL for turning)
+        % If you don't reset Yaw, the linearization Rz becomes wrong!
+        ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred;
 
         % 1. Position Anchoring
         if current_fsm_state == FSM_LOCOMOTION
@@ -402,21 +386,14 @@ while true
             
             % Keep Z height targeted to commanded height (don't drift Z)
             ref_pos(3) = cmd_body_height; 
-       else
+
+            % Overwrite the Yaw part to start from current robot Yaw
+            ref_rpy(3) = state.rpy(3) + body_omega_cmd(3) * t_pred;
+
+        else
             % In Stand, we do want to hold the specific locked point
             ref_pos = body_pos_cmd + body_vel_cmd * t_pred;
-       end
-
-       % 2. Yaw Anchoring (CRITICAL for turning)
-       % If you don't reset Yaw, the linearization Rz becomes wrong!
-       ref_rpy = body_rpy_cmd + body_omega_cmd * t_pred;
-       if current_fsm_state == FSM_LOCOMOTION
-           % Overwrite the Yaw part to start from current robot Yaw
-           ref_rpy(3) = state.rpy(3) + body_omega_cmd(3) * t_pred;
-       end
-
-
-
+        end
 
 
         x_ref_traj(:, k+1) = [ref_rpy; ref_pos; body_omega_cmd; body_vel_cmd]; % fills in the reference trajectory
@@ -451,22 +428,6 @@ while true
         H(x_idx(k), x_idx(k)) = Q;              % State cost (tracking)
         H(u_idx(k), u_idx(k)) = R;              % Force cost (regularization)
         f_vec(x_idx(k)) = -Q * x_ref_traj(:, k);
-
-        % % Build a CONTACT-AWARE nominal force for this horizon step.
-        % % Only stance legs receive non-zero nominal load, and the sum of
-        % % their vertical components equals MASS*GRAVITY.
-        % f_nominal_k = zeros(12, 1);
-        % n_stance_k = sum(contact_plan(:, k));
-        % if n_stance_k > 0
-        %     fz_nominal = MASS * GRAVITY / n_stance_k;
-        %     for leg = 1:4
-        %         if contact_plan(leg, k) == 1
-        %             f_nominal_k(3*leg) = fz_nominal;
-        %         end
-        %     end
-        % end
-        % % Penalize deviation from this contact-aware nominal, not zero.
-        % f_vec(u_idx(k)) = -R * f_nominal_k;
         f_vec(u_idx(k)) = zeros(12, 1);
 
         
@@ -497,22 +458,6 @@ while true
              end
              ineq_row = ineq_row + 5;
         end
-
-        % % Total vertical force constraint: sum(f_z) = mg for stance legs
-        % % This prevents excessive force while allowing redistribution
-        % % why does this have to explicitly be established? is it even in the original paper??
-        % n_stance = sum(contact_plan(:, k));
-        % if n_stance > 0
-        %     eq_row = force_eq_idx(k);
-        %     for leg = 1:4
-        %         if contact_plan(leg, k) == 1
-        %             fz_idx = u_idx(k); fz_idx = fz_idx(3*leg);  % z-component of leg force
-        %             A_eq(eq_row, fz_idx) = 1;
-        %         end
-        %     end
-        %     b_eq(eq_row) = MASS * GRAVITY;  % Total vertical force = mg
-        % end
-
     end
 
     % Solve the QP for the MPC plan
