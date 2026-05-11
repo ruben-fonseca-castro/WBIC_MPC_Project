@@ -34,7 +34,7 @@ class WBICNode:
 
         self.time_since_last_mpc = 0.0
         self.last_foot_vel_cmd   = np.zeros(12)
-        self.mpc_dt_estimate     = 0.025            # default 40 Hz
+        self.mpc_dt_estimate     = 1/60.0           # default 40 Hz
         self.foot_acc_cmd        = np.zeros(12)     # feedforward foot acceleration
 
         self.wbic_cnt = 0
@@ -42,9 +42,12 @@ class WBICNode:
 
         # ── Tuneable flags ───────────────────────────────────────────────────
         self.use_dead_reckoning = False
+        self.fix_integration_leakage = False
+        self.fix_swing_ff_accel = True
 
         # Persistent joint command accumulator (initialised on first state)
         self.q_j_cmd_accum = None
+        self.q_j_vel_cmd_accum = None
 
         # ── Logging ──────────────────────────────────────────────────────────
         self._log_dir  = 'logs'
@@ -55,8 +58,11 @@ class WBICNode:
 
         # ── Pre-computed constant QP matrices (P1/P2 fix) ────────────────────
         # H_qp = 2 * block_diag(0.1*I6, 1.0*I12) — never changes
-        Q2 = 1 * np.eye(6)
-        Q1 = 0.1 * np.eye(12)
+        # Q2 = 1 * np.eye(6)
+        # Q1 = 0.1 * np.eye(12)
+
+        Q2 = 10 * np.eye(6)
+        Q1 = 1 * np.eye(12)
         self._H_qp_dense = 2.0 * block_diag(Q2, Q1)          # (18,18) dense
         self._H_qp_csc   = sparse.csc_matrix(self._H_qp_dense)  # pre-converted
         self._f_qp       = np.zeros(18)                        # always zero
@@ -137,6 +143,7 @@ class WBICNode:
         # Initialise joint accumulator on first call
         if self.q_j_cmd_accum is None:
             self.q_j_cmd_accum = np.array(state.qj_pos)
+            self.q_j_vel_cmd_accum = np.array(state.qj_vel)
 
         # ── 1. Dynamics ───────────────────────────────────────────────────────
         H   = np.array(state.inertia_mat).reshape((18, 18))
@@ -237,7 +244,7 @@ class WBICNode:
 
                 fp  = np.array(plan.foot_pos_cmd).reshape((4, 3)).T
                 fv  = np.array(plan.foot_vel_cmd).reshape((4, 3)).T
-                fa  = self.foot_acc_cmd.reshape((4, 3)).T
+                fa  = self.foot_acc_cmd.reshape((4, 3)).T if self.fix_swing_ff_accel else np.zeros((3, 4))
                 fp  = fp + fv * dt_mpc + 0.5 * fa * dt_mpc**2
                 fv  = fv + fa * dt_mpc
 
@@ -255,7 +262,7 @@ class WBICNode:
                 body_omega_cmd = np.array(plan.body_omega_cmd)
                 p_gc_des_mat_dr = np.array(plan.foot_pos_cmd).reshape((4, 3)).T
                 v_gc_des_mat_dr = np.array(plan.foot_vel_cmd).reshape((4, 3)).T
-                a_gc_des_mat_dr = np.zeros((3, 4))
+                a_gc_des_mat_dr = self.foot_acc_cmd.reshape((4, 3)).T if self.fix_swing_ff_accel else np.zeros((3, 4))
 
             contact_cmd = np.array(plan.contact)
             f_r_mpc     = np.array(plan.reaction_force)
@@ -291,6 +298,8 @@ class WBICNode:
 
         kp_base = 100.0
         kd_base = 10.0
+
+        
 
         # Task 0: Stance
         J_stance_rows = []
@@ -388,16 +397,14 @@ class WBICNode:
         J_pre_1 = J_1 @ N_prev
         J_bar_1 = dynamic_pinv(J_pre_1, H)
         q_ddot_1 = q_ddot_prev + J_bar_1 @ (x_ddot_1 - J_pre_1 @ q_ddot_prev)
-        J_pinv_1 = np.linalg.pinv(J_pre_1)
-        N_prev = N_prev @ (np.eye(18) - J_pinv_1 @ J_pre_1)
+        N_prev = N_prev @ (np.eye(18) - J_bar_1 @ J_pre_1)
         q_ddot_prev = q_ddot_1
 
         # Task 2: Body Position
         J_pre_2 = J_2 @ N_prev
         J_bar_2 = dynamic_pinv(J_pre_2, H)
         q_ddot_2 = q_ddot_prev + J_bar_2 @ (x_ddot_2 - J_pre_2 @ q_ddot_prev)
-        J_pinv_2 = np.linalg.pinv(J_pre_2)
-        N_prev = N_prev @ (np.eye(18) - J_pinv_2 @ J_pre_2)
+        N_prev = N_prev @ (np.eye(18) - J_bar_2 @ J_pre_2)
         q_ddot_prev = q_ddot_2
 
         # Task 3: Swing Foot
@@ -412,18 +419,22 @@ class WBICNode:
         # ── 3b. Joint Integration ─────────────────────────────────────────────
         dt_wbic     = self.dt
         q_j_acc     = q_ddot_cmd[6:18]
-        q_j_vel_cmd = np.array(state.qj_vel) + q_j_acc * dt_wbic
 
         q_j_cmd = np.zeros(12)
+        q_j_vel_cmd = np.zeros(12)
         for leg in range(4):
             idx = slice(3 * leg, 3 * leg + 3)
-            if contact_state[leg] == 1:
+            if contact_state[leg] == 1 or not self.fix_integration_leakage:
+                # For stance (or if fix disabled), use actual velocity to avoid fighting the MPC torques
+                q_j_vel_cmd[idx] = np.array(state.qj_vel)[idx] + q_j_acc[idx] * dt_wbic
                 q_j_cmd[idx] = np.array(state.qj_pos)[idx] + q_j_vel_cmd[idx] * dt_wbic
                 self.q_j_cmd_accum[idx] = np.array(state.qj_pos)[idx]
+                self.q_j_vel_cmd_accum[idx] = np.array(state.qj_vel)[idx]
             else:
-                self.q_j_cmd_accum[idx] = (self.q_j_cmd_accum[idx]
-                                           + q_j_vel_cmd[idx] * dt_wbic
-                                           + 0.5 * q_j_acc[idx] * dt_wbic**2)
+                # For swing, strictly accumulate from the commanded velocity
+                self.q_j_vel_cmd_accum[idx] += q_j_acc[idx] * dt_wbic
+                self.q_j_cmd_accum[idx] += self.q_j_vel_cmd_accum[idx] * dt_wbic
+                q_j_vel_cmd[idx] = self.q_j_vel_cmd_accum[idx]
                 q_j_cmd[idx] = self.q_j_cmd_accum[idx]
 
         # ── 4. QP Solver — persistent instance keyed by contact pattern ───────

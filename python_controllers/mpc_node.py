@@ -72,8 +72,11 @@ class MPCNode:
         self.Q_stand = np.diag([200, 200, 10, 20, 20, 50, 10, 10, 0.5, 3, 3, 5])
         self.Q_loco  = np.diag([375, 375, 25, 30, 40, 40, 15, 15, 0.5, 3, 3, 5])
 
-        R_leg_xy = 1e-9
-        R_leg_z  = 1e-10
+        # R_leg_xy = 1e-9
+        # R_leg_z  = 1e-10
+
+        R_leg_xy = 1e-10
+        R_leg_z  = 1e-11
         self.R   = np.diag(np.tile([R_leg_xy, R_leg_xy, R_leg_z], 4))
 
         self.FSM_STAND      = 0
@@ -226,8 +229,8 @@ class MPCNode:
                             (abs(joy.left_stick_x) > 0.2) or
                             (abs(joy.right_stick_x) > 0.2))
                 if raw_move:
-                    v_des_body   = np.array([-joy.left_stick_y/2, -joy.right_stick_x/2, 0])
-                    des_yaw_rate = -joy.left_stick_x
+                    v_des_body   = np.array([-joy.left_stick_y/2.5, -joy.right_stick_x/2.5, 0])
+                    des_yaw_rate = -joy.left_stick_x/2
             else:
                 raw_move = False
         else:
@@ -316,13 +319,14 @@ class MPCNode:
                     foot_vel_cmd_world[i*3:i*3+3] = v_stance
                 else:
                     p_shoulder = np.array(state.position) + R_z @ self.p_shoulders_body[:, i]
+                    T_swing     = self.current_gait['T_cycle'] * (1 - self.current_gait['stance_percent'])
                     p_target   = get_footstep_target(
                         np.array(state.velocity), v_des_world, body_omega_cmd,
                         p_shoulder, self.current_gait['T_cycle'] * self.current_gait['stance_percent'],
-                        self.k_raibert, self.cmd_body_height, self.GRAVITY
+                        self.k_raibert, self.cmd_body_height, self.GRAVITY,
+                        swing_phase, T_swing
                     )
                     p_target[2] = self.touchdown_positions[2, i]
-                    T_swing     = self.current_gait['T_cycle'] * (1 - self.current_gait['stance_percent'])
                     p_swing, v_swing = get_swing_trajectory_bezier(
                         self.touchdown_positions[:, i], p_target, swing_phase, self.swing_height, T_swing
                     )
@@ -332,7 +336,8 @@ class MPCNode:
             self.prev_contact_state = np.copy(contact_cmd)
 
         # ── MPC QP Formulation ────────────────────────────────────────────────
-        x_current = np.concatenate([state.rpy, state.position, state.omega, state.velocity])
+        omega_world = R_z @ np.array(state.omega)
+        x_current = np.concatenate([state.rpy, state.position, omega_world, state.velocity])
         N         = self.N_horizon
         x_size    = self._x_size
         u_size    = self._u_size

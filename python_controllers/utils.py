@@ -43,8 +43,8 @@ def build_Ak(yaw, dt):
     
     Ak = np.eye(12)
     
-    # Theta(k+1) = Theta(k) + Rz*omega*dt
-    Ak[0:3, 6:9] = Rz * dt
+    # Theta(k+1) = Theta(k) + Rz.T * omega_world * dt
+    Ak[0:3, 6:9] = Rz.T * dt
     
     # p(k+1) = p(k) + p_dot*dt
     Ak[3:6, 9:12] = np.eye(3) * dt

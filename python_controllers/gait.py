@@ -33,11 +33,15 @@ def get_stance_trajectory(p_touchdown, stance_phase, T_stance, delta_amplitude):
     
     return p_stance, v_stance
 
-def get_footstep_target(state_velocity, v_des, omega_des, p_shoulder, T_stance, k_raibert, current_height, gravity):
+def get_footstep_target(state_velocity, v_des, omega_des, p_shoulder, T_stance, k_raibert, current_height, gravity, swing_phase, T_swing):
     """
     Implements Foot Step Planner
     """
     v_curr = state_velocity[0:3]
+    
+    # Kinematic feedforward: expected shoulder position at touchdown
+    time_left_in_swing = T_swing * (1.0 - swing_phase)
+    p_shoulder_td = p_shoulder + v_curr * time_left_in_swing
     
     # 1. Symmetry Term
     p_symmetry = (T_stance / 2.0) * v_curr
@@ -50,7 +54,7 @@ def get_footstep_target(state_velocity, v_des, omega_des, p_shoulder, T_stance, 
     coeff = 0.5 * np.sqrt(current_height / gravity)
     p_centrifugal = coeff * np.cross(v_curr, omega_des)
     
-    p_target = p_shoulder + p_symmetry + p_feedback + p_centrifugal
+    p_target = p_shoulder_td + p_symmetry + p_feedback + p_centrifugal
     p_target[2] = 0.0
     
     return p_target
@@ -66,18 +70,18 @@ def get_swing_trajectory_bezier(p_start, p_target, swing_phase, swing_height, T_
         alpha = i / 11.0
         P[0:2, i] = (1 - alpha) * p_start[0:2] + alpha * p_target[0:2]
         
-        if i <= 1:
-            P[2, i] = p_start[2]
-        elif i >= 10:
-            P[2, i] = p_target[2]
-        elif 5 <= i <= 7:
-            P[2, i] = swing_height
-        elif i < 5:
+        # Base linear interpolation for Z
+        P[2, i] = (1 - alpha) * p_start[2] + alpha * p_target[2]
+        
+        # Add relative swing height profile
+        if 5 <= i <= 7:
+            P[2, i] += swing_height
+        elif 1 < i < 5:
             beta = (i - 1) / 4.0
-            P[2, i] = swing_height * (beta**2)
-        else:
-            beta = (11 - i) / 3.0
-            P[2, i] = swing_height * (beta**2)
+            P[2, i] += swing_height * (beta**2)
+        elif 7 < i < 10:
+            beta = (10 - i) / 3.0
+            P[2, i] += swing_height * (beta**2)
             
     u = swing_phase
     p_foot = np.zeros(3)
