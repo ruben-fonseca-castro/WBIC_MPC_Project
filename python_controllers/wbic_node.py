@@ -55,8 +55,8 @@ class WBICNode:
 
         # ── Pre-computed constant QP matrices (P1/P2 fix) ────────────────────
         # H_qp = 2 * block_diag(0.1*I6, 1.0*I12) — never changes
-        Q2 = 0.1 * np.eye(6)
-        Q1 = 1.0 * np.eye(12)
+        Q2 = 1 * np.eye(6)
+        Q1 = 0.1 * np.eye(12)
         self._H_qp_dense = 2.0 * block_diag(Q2, Q1)          # (18,18) dense
         self._H_qp_csc   = sparse.csc_matrix(self._H_qp_dense)  # pre-converted
         self._f_qp       = np.zeros(18)                        # always zero
@@ -590,10 +590,12 @@ class WBICNode:
             while True:
                 start_time = time.perf_counter()
 
-                # Drain the LCM queue completely so we use the freshest state
-                while True:
-                    if self.lc.handle_timeout(0) == 0:
-                        break
+                # Block for up to 2ms to wait for a new state message (synchronizes loop with simulation)
+                handled = self.lc.handle_timeout(2)
+                if handled > 0:
+                    # Drain any additional stale messages in the queue
+                    while self.lc.handle_timeout(0) > 0:
+                        pass
 
                 self.time_since_last_mpc += self.dt
                 dt_mpc_effective = min(self.time_since_last_mpc, 0.1)

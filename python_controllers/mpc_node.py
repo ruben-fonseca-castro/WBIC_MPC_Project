@@ -467,10 +467,12 @@ class MPCNode:
             while True:
                 deadline = time.perf_counter() + self.dt
 
-                # Drain the LCM queue completely so we use the freshest state
-                while True:
-                    if self.lc.handle_timeout(0) == 0:
-                        break
+                # Block for up to 5ms to wait for a new state message (synchronizes loop with simulation)
+                handled = self.lc.handle_timeout(5)
+                if handled > 0:
+                    # Drain any additional stale messages in the queue
+                    while self.lc.handle_timeout(0) > 0:
+                        pass
 
                 self.run_mpc()
 
